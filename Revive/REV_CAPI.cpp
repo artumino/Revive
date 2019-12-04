@@ -178,6 +178,12 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_Create(ovrSession* pSession, ovrGraphicsLuid*
 	// Initialize the opaque pointer with our own OpenVR-specific struct
 	g_Sessions.emplace_back();
 
+#if defined(DEBUGGER_ON_START)
+	// Debugger Attach
+	while (!::IsDebuggerPresent())
+		Sleep(100);
+#endif
+
 	// Get the LUID for the OpenVR adapter
 	uint64_t adapter;
 	vr::VRSystem()->GetOutputDevice(&adapter, vr::TextureType_DirectX);
