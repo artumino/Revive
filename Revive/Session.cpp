@@ -49,10 +49,13 @@ void SessionThreadFunc(ovrSession session)
 			break;
 			case vr::VREvent_TrackedDeviceUserInteractionStarted:
 			case vr::VREvent_TrackedDeviceUserInteractionEnded:
+			case vr::VREvent_EnterStandbyMode:
+			case vr::VREvent_LeaveStandbyMode:
 			if (vrEvent.trackedDeviceIndex == vr::k_unTrackedDeviceIndex_Hmd)
 			{
 				SessionStatusBits status = session->SessionStatus;
-				status.HmdMounted = vrEvent.eventType == vr::VREvent_TrackedDeviceUserInteractionStarted;
+				status.HmdMounted = vrEvent.eventType == vr::VREvent_TrackedDeviceUserInteractionStarted 
+									|| vrEvent.eventType == vr::VREvent_LeaveStandbyMode;
 				session->SessionStatus = status;
 			}
 			break;
@@ -75,6 +78,16 @@ void SessionThreadFunc(ovrSession session)
 
 #ifdef DEBUG
 			OutputDebugStringA(vr::VRSystem()->GetEventTypeNameFromEnum((vr::EVREventType)vrEvent.eventType));
+			OutputDebugStringA("\n"); 
+
+			char buffer[150];
+			SessionStatusBits status = session->SessionStatus;
+			sprintf_s(buffer, "Session infos: IsVisible=%d HmdPresent=%d HmdMounted=%d HasInputFocus=%d", 
+				status.IsVisible,
+				status.HmdPresent,
+				status.HmdMounted,
+				status.HasInputFocus);
+			OutputDebugStringA(buffer);
 			OutputDebugStringA("\n");
 #endif
 		}
