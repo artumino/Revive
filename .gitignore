@@ -267,3 +267,5 @@ Installer/*.exe
 GeneratedFiles
 *.qmlc
 *.jsc
+/Externals/**/*
+/tmp_deps
