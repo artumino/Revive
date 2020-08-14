@@ -128,29 +128,32 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_Initialize(const ovrInitParams* params)
 		return ovrError_Timeout;
 
 	// Initialize presence if plugin is present
-	std::vector<char> pathVec;
-	DWORD pathSize = MAX_PATH;
-	LSTATUS status = RegGetValueA(HKEY_LOCAL_MACHINE, "Software\\Revive", "", RRF_RT_REG_SZ | RRF_SUBKEY_WOW6432KEY, NULL, NULL, &pathSize);
-	if (status == ERROR_SUCCESS)
+	if (g_piRichPresence.hProcess == NULL)
 	{
-		pathVec.resize(pathSize);
-		status = RegGetValueA(HKEY_LOCAL_MACHINE, "Software\\Revive", "", RRF_RT_REG_SZ | RRF_SUBKEY_WOW6432KEY, NULL, pathVec.data(), &pathSize);
-
+		std::vector<char> pathVec;
+		DWORD pathSize = MAX_PATH;
+		LSTATUS status = RegGetValueA(HKEY_LOCAL_MACHINE, "Software\\Revive", "", RRF_RT_REG_SZ | RRF_SUBKEY_WOW6432KEY, NULL, NULL, &pathSize);
 		if (status == ERROR_SUCCESS)
 		{
-			std::string path(pathVec.data());
-			std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
-			std::wstring processDirectory = converter.from_bytes(path);
-			std::wstring processName = processDirectory + L"\\Plugins\\RichPresencePlugin.exe";
-			
-			//DebugBreak();
-			char appKey[MAX_PATH];
-			char appName[MAX_PATH];
-			vr::VRApplications()->GetApplicationKeyByProcessId(GetCurrentProcessId(), appKey, MAX_PATH);
-			vr::VRApplications()->GetApplicationPropertyString(appKey, vr::EVRApplicationProperty::VRApplicationProperty_Name_String, appName, MAX_PATH);
+			pathVec.resize(pathSize);
+			status = RegGetValueA(HKEY_LOCAL_MACHINE, "Software\\Revive", "", RRF_RT_REG_SZ | RRF_SUBKEY_WOW6432KEY, NULL, pathVec.data(), &pathSize);
 
-			std::wstring processCmd = L"\"" + processName + L"\" -pid:" + std::to_wstring(GetCurrentProcessId()) + L" -name:" + converter.from_bytes(appName);
-			CreateProcess(processName.c_str(), (wchar_t*)processCmd.c_str(), nullptr, nullptr, FALSE, 0, nullptr, processDirectory.c_str(), &g_siRichPresence, &g_piRichPresence);
+			if (status == ERROR_SUCCESS)
+			{
+				std::string path(pathVec.data());
+				std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
+				std::wstring processDirectory = converter.from_bytes(path);
+				std::wstring processName = processDirectory + L"\\Plugins\\RichPresencePlugin.exe";
+
+				//DebugBreak();
+				char appKey[MAX_PATH];
+				char appName[MAX_PATH];
+				vr::VRApplications()->GetApplicationKeyByProcessId(GetCurrentProcessId(), appKey, MAX_PATH);
+				vr::VRApplications()->GetApplicationPropertyString(appKey, vr::EVRApplicationProperty::VRApplicationProperty_Name_String, appName, MAX_PATH);
+
+				std::wstring processCmd = L"\"" + processName + L"\" -pid:" + std::to_wstring(GetCurrentProcessId()) + L" -name:" + converter.from_bytes(appName);
+				CreateProcess(processName.c_str(), (wchar_t*)processCmd.c_str(), nullptr, nullptr, FALSE, 0, nullptr, processDirectory.c_str(), &g_siRichPresence, &g_piRichPresence);
+			}
 		}
 	}
 
