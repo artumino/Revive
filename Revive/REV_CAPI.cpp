@@ -17,12 +17,17 @@
 #include <algorithm>
 #include <thread>
 #include <assert.h>
+#include <codecvt>
 
 #define REV_DEFAULT_TIMEOUT 10000
 
 unsigned int g_MinorVersion = OVR_MINOR_VERSION;
 vr::EVRInitError g_InitError = vr::VRInitError_Init_NotInitialized;
 std::list<ovrHmdStruct> g_Sessions;
+
+STARTUPINFO g_siRichPresence = { sizeof(STARTUPINFO) };
+PROCESS_INFORMATION g_piRichPresence;
+HANDLE g_heReviveCloseEvent;
 
 #if MICROPROFILE_ENABLED
 ProfileManager g_ProfileManager;
@@ -122,6 +127,34 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_Initialize(const ovrInitParams* params)
 	if (vr::VRCompositor() == nullptr)
 		return ovrError_Timeout;
 
+	// Initialize presence if plugin is present
+	std::vector<char> pathVec;
+	DWORD pathSize = MAX_PATH;
+	LSTATUS status = RegGetValueA(HKEY_LOCAL_MACHINE, "Software\\Revive", "", RRF_RT_REG_SZ | RRF_SUBKEY_WOW6432KEY, NULL, NULL, &pathSize);
+	if (status == ERROR_SUCCESS)
+	{
+		pathVec.resize(pathSize);
+		status = RegGetValueA(HKEY_LOCAL_MACHINE, "Software\\Revive", "", RRF_RT_REG_SZ | RRF_SUBKEY_WOW6432KEY, NULL, pathVec.data(), &pathSize);
+
+		if (status == ERROR_SUCCESS)
+		{
+			std::string path(pathVec.data());
+			std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
+			std::wstring processDirectory = converter.from_bytes(path);
+			std::wstring processName = processDirectory + L"\\Plugins\\RichPresencePlugin.exe";
+			
+			//DebugBreak();
+			char appKey[MAX_PATH];
+			char appName[MAX_PATH];
+			vr::VRApplications()->GetApplicationKeyByProcessId(GetCurrentProcessId(), appKey, MAX_PATH);
+			vr::VRApplications()->GetApplicationPropertyString(appKey, vr::EVRApplicationProperty::VRApplicationProperty_Name_String, appName, MAX_PATH);
+
+			std::wstring processCmd = L"\"" + processName + L"\" -pid:" + std::to_wstring(GetCurrentProcessId()) + L" -name:" + converter.from_bytes(appName);
+			CreateProcess(processName.c_str(), (wchar_t*)processCmd.c_str(), nullptr, nullptr, FALSE, 0, nullptr, processDirectory.c_str(), &g_siRichPresence, &g_piRichPresence);
+		}
+	}
+
+
 #if MICROPROFILE_ENABLED
 	if (!g_ProfileManager.Initialize())
 		return ovrError_RuntimeException;
@@ -132,6 +165,13 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_Initialize(const ovrInitParams* params)
 
 OVR_PUBLIC_FUNCTION(void) ovr_Shutdown()
 {
+	// Close RichPresence process
+	if (g_piRichPresence.hProcess)
+	{
+		CloseHandle(g_piRichPresence.hProcess);
+		CloseHandle(g_piRichPresence.hThread);
+	}
+
 #if MICROPROFILE_ENABLED
 	g_ProfileManager.Shutdown();
 #endif
