@@ -13,3 +13,6 @@
 [submodule "Externals/Detours"]
 	path = Externals/Detours
 	url = https://github.com/microsoft/Detours
+[submodule "Externals/RichPresencePlugin"]
+	path = Externals/RichPresencePlugin
+	url = https://github.com/artumino/RichPresencePlugin.git
