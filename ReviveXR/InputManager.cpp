@@ -1,11 +1,9 @@
 #include "InputManager.h"
 #include "Common.h"
 #include "Session.h"
+#include "Runtime.h"
 #include "OVR_CAPI.h"
 #include "XR_Math.h"
-#ifdef _DEBUG
-#include "Debug.h"
-#endif
 
 #include <Windows.h>
 #include <openxr/openxr.h>
@@ -45,12 +43,6 @@ InputManager::InputManager(XrInstance instance)
 
 InputManager::~InputManager()
 {
-	for (XrSpace space : m_ActionSpaces)
-	{
-		XrResult rs = xrDestroySpace(space);
-		assert(XR_SUCCEEDED(rs));
-	}
-
 	for (InputDevice* device : m_InputDevices)
 		delete device;
 }
@@ -141,28 +133,6 @@ ovrTouchHapticsDesc InputManager::GetTouchHapticsDesc(ovrControllerType controll
 	return desc;
 }
 
-XrTime InputManager::AbsTimeToXrTime(XrInstance instance, double absTime)
-{
-	XR_FUNCTION(instance, ConvertWin32PerformanceCounterToTimeKHR);
-
-	// Get back the XrTime
-	static double PerfFrequency = 0.0;
-	if (PerfFrequency == 0.0)
-	{
-		LARGE_INTEGER freq;
-		QueryPerformanceFrequency(&freq);
-		PerfFrequency = (double)freq.QuadPart;
-	}
-
-	XrResult rs;
-	XrTime time;
-	LARGE_INTEGER li;
-	li.QuadPart = (LONGLONG)(absTime * PerfFrequency);
-	rs = ConvertWin32PerformanceCounterToTimeKHR(instance, &li, &time);
-	assert(XR_SUCCEEDED(rs));
-	return time;
-}
-
 unsigned int InputManager::SpaceRelationToPoseState(const XrSpaceLocation& location, double time, ovrPoseStatef& lastPoseState, ovrPoseStatef& outPoseState)
 {
 	unsigned int flags = 0;
@@ -220,48 +190,31 @@ unsigned int InputManager::SpaceRelationToPoseState(const XrSpaceLocation& locat
 	return flags;
 }
 
-#ifdef _DEBUG
-ReviveTrackingPlotter trackingPlotter(1000);
-#endif
-
 void InputManager::GetTrackingState(ovrSession session, ovrTrackingState* outState, double absTime)
 {
 	double calledTime = absTime;
 
-	if (absTime <= 0.0)
-		absTime = ovr_GetTimeInSeconds();
+	if (!session->Session)
+		return;
 
-	XrResult rs;
 	XrSpaceLocation location = XR_TYPE(SPACE_LOCATION);
 	XrSpaceVelocity velocity = XR_TYPE(SPACE_VELOCITY);
-	XrTime displayTime = AbsTimeToXrTime(session->Instance, absTime);
+	location.next = &velocity;
+	XrTime displayTime = absTime <= 0.0 ? AbsTimeToXrTime(session->Instance, ovr_GetTimeInSeconds()) : AbsTimeToXrTime(session->Instance, absTime);
 	XrSpace space = (session->TrackingSpace == XR_REFERENCE_SPACE_TYPE_STAGE) ? session->StageSpace : session->LocalSpace;
 
 	// Get space relation for the head
-	location.next = &velocity;
-	rs = xrLocateSpace(session->ViewSpace, space, displayTime, &location);
-	assert(XR_SUCCEEDED(rs));
-	outState->StatusFlags = SpaceRelationToPoseState(location, absTime, m_LastTrackingState.HeadPose, outState->HeadPose);
+	if (XR_SUCCEEDED(xrLocateSpace(session->ViewSpace, space, displayTime, &location)))
+		outState->StatusFlags = SpaceRelationToPoseState(location, absTime, m_LastTrackingState.HeadPose, outState->HeadPose);
 
 	// Convert the hand poses
-	for (int i = 0; i < ovrHand_Count; i++)
+	for (uint32_t i = 0; i < ovrHand_Count; i++)
 	{
 		XrSpaceLocation handLocation = XR_TYPE(SPACE_LOCATION);
 		handLocation.next = &velocity;
-		if (i < m_ActionSpaces.size())
-		{
-			rs = xrLocateSpace(m_ActionSpaces[i], space, displayTime, &handLocation);
-			assert(XR_SUCCEEDED(rs));
-		}
-
-		outState->HandStatusFlags[i] = SpaceRelationToPoseState(handLocation, absTime, m_LastTrackingState.HandPoses[i], outState->HandPoses[i]);
+		if (i < m_ActionSpaces.size() && XR_SUCCEEDED(xrLocateSpace(m_ActionSpaces[i], space, displayTime, &handLocation)))
+			outState->HandStatusFlags[i] = SpaceRelationToPoseState(handLocation, absTime, m_LastTrackingState.HandPoses[i], outState->HandPoses[i]);
 	}
-
-#ifdef _DEBUG
-	trackingPlotter.SampleValue(*outState, session->NextFrame, absTime, calledTime);
-	if ((trackingPlotter.size() % 8) == 0)
-		trackingPlotter.plot();
-#endif
 
 	m_LastTrackingState = *outState;
 
@@ -270,10 +223,12 @@ void InputManager::GetTrackingState(ovrSession session, ovrTrackingState* outSta
 
 ovrResult InputManager::GetDevicePoses(ovrSession session, ovrTrackedDeviceType* deviceTypes, int deviceCount, double absTime, ovrPoseStatef* outDevicePoses)
 {
-	XrTime displayTime = AbsTimeToXrTime(session->Instance, absTime);
+	XrTime displayTime = absTime <= 0.0 ? (*session->CurrentFrame).predictedDisplayTime : AbsTimeToXrTime(session->Instance, absTime);
 	XrSpace space = (session->TrackingSpace == XR_REFERENCE_SPACE_TYPE_STAGE) ? session->StageSpace : session->LocalSpace;
 
-	XrSpaceLocation relation = XR_TYPE(SPACE_LOCATION);
+	XrSpaceLocation location = XR_TYPE(SPACE_LOCATION);
+	XrSpaceVelocity velocity = XR_TYPE(SPACE_VELOCITY);
+	location.next = &velocity;
 	for (int i = 0; i < deviceCount; i++)
 	{
 		// Get the space for device types we recognize
@@ -297,8 +252,8 @@ ovrResult InputManager::GetDevicePoses(ovrSession session, ovrTrackedDeviceType*
 
 		if (space && pLastState)
 		{
-			CHK_XR(xrLocateSpace(m_ActionSpaces[i], space, displayTime, &relation));
-			SpaceRelationToPoseState(relation, absTime, *pLastState, outDevicePoses[i]);
+			CHK_XR(xrLocateSpace(m_ActionSpaces[i], space, displayTime, &location));
+			SpaceRelationToPoseState(location, absTime, *pLastState, outDevicePoses[i]);
 		}
 		else
 		{
@@ -324,17 +279,8 @@ InputManager::Action::Action(InputDevice* device, XrActionType type, const char*
 		createInfo.countSubactionPaths = ovrHand_Count;
 		createInfo.subactionPaths = s_SubActionPaths;
 	}
-	XrResult rs = xrCreateAction((XrActionSet)*device, &createInfo, &m_Action);
+	XrResult rs = xrCreateAction(device->ActionSet(), &createInfo, &m_Action);
 	assert(XR_SUCCEEDED(rs));
-}
-
-InputManager::Action::~Action()
-{
-	if (m_Action)
-	{
-		XrResult rs = xrDestroyAction(m_Action);
-		assert(XR_SUCCEEDED(rs));
-	}
 }
 
 bool InputManager::Action::GetDigital(XrSession session, ovrHandType hand) const
@@ -480,7 +426,7 @@ void InputManager::OculusTouch::HapticsThread(XrSession session, OculusTouch* de
 			}
 		}
 
-		// std::this_thread::sleep_for(freq);
+		std::this_thread::sleep_for(freq);
 	}
 }
 
@@ -488,6 +434,7 @@ InputManager::OculusTouch::OculusTouch(XrInstance instance)
 	: InputDevice(instance, "touch", "Oculus Touch")
 	, m_bHapticsRunning(false)
 	, m_Button_Enter(this, XR_ACTION_TYPE_BOOLEAN_INPUT, "enter-click", "Menu button")
+	, m_Button_Home(this, XR_ACTION_TYPE_BOOLEAN_INPUT, "home-click", "Home button")
 	, m_Button_AX(this, XR_ACTION_TYPE_BOOLEAN_INPUT, "ax-click", "A/X pressed", true)
 	, m_Button_BY(this, XR_ACTION_TYPE_BOOLEAN_INPUT, "by-click", "B/Y pressed", true)
 	, m_Button_Thumb(this, XR_ACTION_TYPE_BOOLEAN_INPUT, "thumb-click", "Thumbstick pressed", true)
@@ -502,6 +449,8 @@ InputManager::OculusTouch::OculusTouch(XrInstance instance)
 	, m_Pose(this, XR_ACTION_TYPE_POSE_INPUT, "pose", "Controller pose", true)
 	, m_Vibration(this, XR_ACTION_TYPE_VIBRATION_OUTPUT, "vibration", "Vibration", true)
 {
+	if (Runtime::Get().UseHack(Runtime::HACK_WMR_PROFILE))
+		m_Trackpad_Buttons = Action(this, XR_ACTION_TYPE_FLOAT_INPUT, "trackpad-buttons", "Trackpad Buttons", true);
 }
 
 InputManager::OculusTouch::~OculusTouch()
@@ -526,26 +475,66 @@ XrPath InputManager::OculusTouch::GetSuggestedBindings(std::vector<XrActionSugge
 
 #define ADD_BINDING(action, path) outBindings.push_back(XrActionSuggestedBinding{ action, GetXrPath(path) })
 
-	ADD_BINDING(m_Button_AX, "/user/hand/left/input/x/click");
-	ADD_BINDING(m_Button_BY, "/user/hand/left/input/y/click");
-	ADD_BINDING(m_Button_AX, "/user/hand/right/input/a/click");
-	ADD_BINDING(m_Button_BY, "/user/hand/right/input/b/click");
-	ADD_BINDING(m_Touch_AX, "/user/hand/left/input/x/touch");
-	ADD_BINDING(m_Touch_BY, "/user/hand/left/input/y/touch");
-	ADD_BINDING(m_Touch_AX, "/user/hand/right/input/a/touch");
-	ADD_BINDING(m_Touch_BY, "/user/hand/right/input/b/touch");
-	ADD_BINDING(m_Button_Enter, "/user/hand/left/input/menu/click");
+	if (Runtime::Get().UseHack(Runtime::HACK_WMR_PROFILE))
+	{
+		ADD_BINDING(m_Button_Enter, "/user/hand/left/input/menu/click");
+		ADD_BINDING(m_Button_Home, "/user/hand/right/input/menu/click");
+	}
+	else
+	{
+		if (Runtime::Get().UseHack(Runtime::HACK_VALVE_INDEX_PROFILE))
+		{
+			ADD_BINDING(m_Button_Enter, "/user/hand/left/input/trackpad/force");
+			ADD_BINDING(m_Button_AX, "/user/hand/left/input/a/click");
+			ADD_BINDING(m_Button_BY, "/user/hand/left/input/b/click");
+			ADD_BINDING(m_Touch_AX, "/user/hand/left/input/a/touch");
+			ADD_BINDING(m_Touch_BY, "/user/hand/left/input/b/touch");
+			ADD_BINDING(m_Button_Home, "/user/hand/right/input/trackpad/force");
+		}
+		else
+		{
+			ADD_BINDING(m_Button_Enter, "/user/hand/left/input/menu/click");
+			ADD_BINDING(m_Button_AX, "/user/hand/left/input/x/click");
+			ADD_BINDING(m_Button_BY, "/user/hand/left/input/y/click");
+			ADD_BINDING(m_Touch_AX, "/user/hand/left/input/x/touch");
+			ADD_BINDING(m_Touch_BY, "/user/hand/left/input/y/touch");
+			ADD_BINDING(m_Button_Home, "/user/hand/right/input/system/click");
+		}
+		ADD_BINDING(m_Button_AX, "/user/hand/right/input/a/click");
+		ADD_BINDING(m_Button_BY, "/user/hand/right/input/b/click");
+		ADD_BINDING(m_Touch_AX, "/user/hand/right/input/a/touch");
+		ADD_BINDING(m_Touch_BY, "/user/hand/right/input/b/touch");
+	}
 
 	for (int i = 0; i < ovrHand_Count; i++)
 	{
-		ADD_BINDING(m_Thumbstick, prefixes[i] + "/input/thumbstick");
-		ADD_BINDING(m_Button_Thumb, prefixes[i] + "/input/thumbstick/click");
-		ADD_BINDING(m_Touch_Thumb, prefixes[i] + "/input/thumbstick/touch");
-		ADD_BINDING(m_Touch_ThumbRest, prefixes[i] + "/input/thumbrest/touch");
-		ADD_BINDING(m_Touch_IndexTrigger, prefixes[i] + "/input/trigger/touch");
+		if (Runtime::Get().UseHack(Runtime::HACK_WMR_PROFILE))
+		{
+			ADD_BINDING(m_Trackpad_Buttons, prefixes[i] + "/input/trackpad/y");
+			ADD_BINDING(m_Button_AX, prefixes[i] + "/input/trackpad/click");
+			ADD_BINDING(m_Button_BY, prefixes[i] + "/input/trackpad/click");
+			ADD_BINDING(m_Touch_AX, prefixes[i] + "/input/trackpad/touch");
+			ADD_BINDING(m_Touch_BY, prefixes[i] + "/input/trackpad/touch");
 
-		ADD_BINDING(m_IndexTrigger, prefixes[i] + "/input/trigger/value");
-		ADD_BINDING(m_HandTrigger, prefixes[i] + "/input/squeeze/value");
+			ADD_BINDING(m_Thumbstick, prefixes[i] + "/input/thumbstick");
+			ADD_BINDING(m_Button_Thumb, prefixes[i] + "/input/thumbstick/click");
+			ADD_BINDING(m_HandTrigger, prefixes[i] + "/input/squeeze/click");
+			ADD_BINDING(m_Touch_IndexTrigger, prefixes[i] + "/input/trigger/value");
+			ADD_BINDING(m_IndexTrigger, prefixes[i] + "/input/trigger/value");
+		}
+		else
+		{
+			ADD_BINDING(m_Thumbstick, prefixes[i] + "/input/thumbstick");
+			ADD_BINDING(m_Button_Thumb, prefixes[i] + "/input/thumbstick/click");
+			ADD_BINDING(m_Touch_Thumb, prefixes[i] + "/input/thumbstick/touch");
+			if (Runtime::Get().UseHack(Runtime::HACK_VALVE_INDEX_PROFILE))
+				ADD_BINDING(m_Touch_ThumbRest, prefixes[i] + "/input/trackpad/touch");
+			else
+				ADD_BINDING(m_Touch_ThumbRest, prefixes[i] + "/input/thumbrest/touch");
+			ADD_BINDING(m_HandTrigger, prefixes[i] + "/input/squeeze/value");
+			ADD_BINDING(m_Touch_IndexTrigger, prefixes[i] + "/input/trigger/touch");
+			ADD_BINDING(m_IndexTrigger, prefixes[i] + "/input/trigger/value");
+		}
 
 		ADD_BINDING(m_Pose, prefixes[i] + "/input/aim/pose");
 		ADD_BINDING(m_Vibration, prefixes[i] + "/output/haptic");
@@ -553,7 +542,12 @@ XrPath InputManager::OculusTouch::GetSuggestedBindings(std::vector<XrActionSugge
 
 #undef ADD_BINDING
 
-	return GetXrPath("/interaction_profiles/oculus/touch_controller");
+	if (Runtime::Get().UseHack(Runtime::HACK_VALVE_INDEX_PROFILE))
+		return GetXrPath("/interaction_profiles/valve/index_controller");
+	else if (Runtime::Get().UseHack(Runtime::HACK_WMR_PROFILE))
+		return GetXrPath("/interaction_profiles/microsoft/motion_controller");
+	else
+		return GetXrPath("/interaction_profiles/oculus/touch_controller");
 }
 
 void InputManager::OculusTouch::GetActionSpaces(XrSession session, std::vector<XrSpace>& outSpaces) const
@@ -583,22 +577,48 @@ bool InputManager::OculusTouch::GetInputState(XrSession session, ovrControllerTy
 	if (m_Button_Enter.GetDigital(session))
 		inputState->Buttons |= ovrButton_Enter;
 
+	// In most games this doesn't really do anything,
+	// because it would normally open the dashboard.
+	if (m_Button_Home.GetDigital(session))
+		inputState->Buttons |= ovrButton_Home;
+
 	for (int i = 0; i < ovrHand_Count; i++)
 	{
 		ovrHandType hand = (ovrHandType)i;
 		unsigned int buttons = 0, touches = 0;
 
-		if (m_Button_AX.GetDigital(session, hand))
-			buttons |= ovrButton_A;
+		if (Runtime::Get().UseHack(Runtime::HACK_WMR_PROFILE))
+		{
+			if (m_Button_AX.GetDigital(session, hand) || m_Button_BY.GetDigital(session, hand))
+			{
+				if (m_Trackpad_Buttons.GetAnalog(session, hand) > 0.0f)
+					buttons |= ovrButton_B;
+				else
+					buttons |= ovrButton_A;
+			}
 
-		if (m_Touch_AX.GetDigital(session, hand))
-			touches |= ovrTouch_A;
+			if (m_Touch_AX.GetDigital(session, hand) || m_Touch_BY.GetDigital(session, hand))
+			{
+				if (m_Trackpad_Buttons.GetAnalog(session, hand) > 0.0f)
+					touches |= ovrTouch_B;
+				else
+					touches |= ovrTouch_A;
+			}
+		}
+		else
+		{
+			if (m_Button_AX.GetDigital(session, hand))
+				buttons |= ovrButton_A;
 
-		if (m_Button_BY.GetDigital(session, hand))
-			buttons |= ovrButton_B;
+			if (m_Touch_AX.GetDigital(session, hand))
+				touches |= ovrTouch_A;
 
-		if (m_Touch_BY.GetDigital(session, hand))
-			touches |= ovrTouch_B;
+			if (m_Button_BY.GetDigital(session, hand))
+				buttons |= ovrButton_B;
+
+			if (m_Touch_BY.GetDigital(session, hand))
+				touches |= ovrTouch_B;
+		}
 
 		if (m_Button_Thumb.GetDigital(session, hand))
 			buttons |= ovrButton_RThumb;
@@ -889,16 +909,23 @@ void InputManager::XboxGamepad::GetActiveSets(std::vector<XrActiveActionSet>& ou
 
 ovrResult InputManager::AttachSession(XrSession session)
 {
-	std::vector<XrActionSet> actionSets;
-	for (InputDevice* device : m_InputDevices)
-	{
-		device->GetActionSpaces(session, m_ActionSpaces);
-		actionSets.push_back(*device);
-	}
+	for (XrSpace space : m_ActionSpaces)
+		CHK_XR(xrDestroySpace(space));
+	m_ActionSpaces.clear();
 
-	XrSessionActionSetsAttachInfo attachInfo = XR_TYPE(SESSION_ACTION_SETS_ATTACH_INFO);
-	attachInfo.countActionSets = (uint32_t)actionSets.size();
-	attachInfo.actionSets = actionSets.data();
-	CHK_XR(xrAttachSessionActionSets(session, &attachInfo));
+	if (session)
+	{
+		std::vector<XrActionSet> actionSets;
+		for (InputDevice* device : m_InputDevices)
+		{
+			device->GetActionSpaces(session, m_ActionSpaces);
+			actionSets.push_back(device->ActionSet());
+		}
+
+		XrSessionActionSetsAttachInfo attachInfo = XR_TYPE(SESSION_ACTION_SETS_ATTACH_INFO);
+		attachInfo.countActionSets = (uint32_t)actionSets.size();
+		attachInfo.actionSets = actionSets.data();
+		CHK_XR(xrAttachSessionActionSets(session, &attachInfo));
+	}
 	return ovrSuccess;
 }

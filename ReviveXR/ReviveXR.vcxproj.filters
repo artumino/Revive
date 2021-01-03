@@ -66,17 +66,8 @@
     <ClInclude Include="XR_Math.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="Extensions.h">
+    <ClInclude Include="Runtime.h">
       <Filter>Header Files\LibRevive</Filter>
-    </ClInclude>
-    <ClInclude Include="SessionDetails.h">
-      <Filter>Header Files\LibRevive</Filter>
-    </ClInclude>
-    <ClInclude Include="CImg.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="Debug.h">
-      <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
@@ -107,24 +98,27 @@
     <ClCompile Include="REV_CAPI_Vk.cpp">
       <Filter>Source Files\LibOVR</Filter>
     </ClCompile>
-    <ClCompile Include="..\Externals\glad\src\glad.c">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="Common.cpp">
       <Filter>Source Files\LibRevive</Filter>
     </ClCompile>
     <ClCompile Include="Swapchain.cpp">
       <Filter>Source Files\LibRevive</Filter>
     </ClCompile>
-    <ClCompile Include="Extensions.cpp">
+    <ClCompile Include="Session.cpp">
       <Filter>Source Files\LibRevive</Filter>
     </ClCompile>
-    <ClCompile Include="SessionDetails.cpp">
+    <ClCompile Include="..\Externals\glad\src\glad.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Runtime.cpp">
       <Filter>Source Files\LibRevive</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="cpp.hint" />
+    <None Include="ReviveXR.def">
+      <Filter>Source Files</Filter>
+    </None>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="Revive.rc">

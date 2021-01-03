@@ -1,16 +1,18 @@
 #include "OVR_CAPI_D3D.h"
 #include "Common.h"
 #include "Session.h"
+#include "Runtime.h"
 #include "SwapChain.h"
-#include "InputManager.h"
 #include "XR_Math.h"
 
-#include <detours.h>
+#include <detours/detours.h>
 #include <vector>
 #include <algorithm>
 
 #define XR_USE_GRAPHICS_API_D3D11
+#define XR_USE_GRAPHICS_API_D3D12
 #include <d3d11.h>
+#include <d3d12.h>
 #include <openxr/openxr_platform.h>
 
 LONG DetourVirtual(PVOID pInstance, UINT methodPos, PVOID *ppPointer, PVOID pDetour)
@@ -23,18 +25,96 @@ LONG DetourVirtual(PVOID pInstance, UINT methodPos, PVOID *ppPointer, PVOID pDet
 	return DetourAttach(ppPointer, pDetour);
 }
 
-typedef HRESULT(WINAPI* _CreateRenderTargetView)(
-	ID3D11Device						*pDevice,
-	ID3D11Resource                      *pResource,
-	const D3D11_RENDER_TARGET_VIEW_DESC *pDesc,
-	ID3D11RenderTargetView              **ppSRView
-	);
-
-_CreateRenderTargetView TrueCreateRenderTargetView;
-
 // {EBA3BA6A-76A2-4A9B-B150-681FC1020EDE}
 static const GUID RXR_RTV_DESC =
 { 0xeba3ba6a, 0x76a2, 0x4a9b,{ 0xb1, 0x50, 0x68, 0x1f, 0xc1, 0x2, 0xe, 0xde } };
+// {FD3C4A2A-F328-4CC7-9495-A96CF78DEE46}
+static const GUID RXR_SRV_DESC =
+{ 0xfd3c4a2a, 0xf328, 0x4cc7, { 0x94, 0x95, 0xa9, 0x6c, 0xf7, 0x8d, 0xee, 0x46 } };
+
+typedef HRESULT(WINAPI* _CreateTexture2D)(
+	ID3D11Device                 *This,
+	const D3D11_TEXTURE2D_DESC   *pDesc,
+	const D3D11_SUBRESOURCE_DATA *pInitialData,
+	ID3D11Texture2D              **ppTexture2D);
+typedef HRESULT(WINAPI* _CreateShaderResourceView)(
+	ID3D11Device						  *This,
+	ID3D11Resource                        *pResource,
+	const D3D11_SHADER_RESOURCE_VIEW_DESC *pDesc,
+	ID3D11ShaderResourceView              **ppSRView);
+typedef HRESULT(WINAPI* _CreateRenderTargetView)(
+	ID3D11Device						*This,
+	ID3D11Resource                      *pResource,
+	const D3D11_RENDER_TARGET_VIEW_DESC *pDesc,
+	ID3D11RenderTargetView              **ppRTView);
+
+_CreateTexture2D TrueCreateTexture2D;
+_CreateShaderResourceView TrueCreateShaderResourceView;
+_CreateRenderTargetView TrueCreateRenderTargetView;
+
+thread_local const ovrTextureSwapChainDesc* g_SwapChainDesc = nullptr;
+HRESULT WINAPI HookCreateTexture2D(
+	ID3D11Device                 *This,
+	const D3D11_TEXTURE2D_DESC   *pDesc,
+	const D3D11_SUBRESOURCE_DATA *pInitialData,
+	ID3D11Texture2D              **ppTexture2D)
+{
+	if (g_SwapChainDesc)
+	{
+		D3D11_TEXTURE2D_DESC desc = *pDesc;
+
+		// Force support for 8-bit linear formats
+		if (desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB &&
+			g_SwapChainDesc->Format == OVR_FORMAT_R8G8B8A8_UNORM)
+			desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+		else if (desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB &&
+			g_SwapChainDesc->Format == OVR_FORMAT_B8G8R8A8_UNORM)
+			desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+
+		// Force support for swapchain mipmaps
+		desc.MipLevels = g_SwapChainDesc->MipLevels;
+		if (desc.MipLevels > 1)
+			desc.MiscFlags |= D3D11_RESOURCE_MISC_GENERATE_MIPS;
+
+		// Force support for XR_SWAPCHAIN_USAGE_SAMPLED_BIT on all formats
+		desc.BindFlags |= D3D11_BIND_SHADER_RESOURCE;
+		return TrueCreateTexture2D(This, &desc, pInitialData, ppTexture2D);
+	}
+
+	return TrueCreateTexture2D(This, pDesc, pInitialData, ppTexture2D);
+}
+
+HRESULT WINAPI HookCreateRenderTargetView(
+	ID3D11Device						*This,
+	ID3D11Resource                      *pResource,
+	const D3D11_RENDER_TARGET_VIEW_DESC *pDesc,
+	ID3D11RenderTargetView              **ppRTView)
+{
+	D3D11_RENDER_TARGET_VIEW_DESC desc;
+	UINT size = (UINT)sizeof(desc);
+	if (SUCCEEDED(pResource->GetPrivateData(RXR_RTV_DESC, &size, &desc)))
+	{
+		return TrueCreateRenderTargetView(This, pResource, &desc, ppRTView);
+	}
+
+	return TrueCreateRenderTargetView(This, pResource, pDesc, ppRTView);
+}
+
+HRESULT WINAPI HookCreateShaderResourceView(
+	ID3D11Device						  *This,
+	ID3D11Resource                        *pResource,
+	const D3D11_SHADER_RESOURCE_VIEW_DESC *pDesc,
+	ID3D11ShaderResourceView              **ppSRView)
+{
+	D3D11_SHADER_RESOURCE_VIEW_DESC desc;
+	UINT size = (UINT)sizeof(desc);
+	if (SUCCEEDED(pResource->GetPrivateData(RXR_SRV_DESC, &size, &desc)))
+	{
+		return TrueCreateShaderResourceView(This, pResource, &desc, ppSRView);
+	}
+
+	return TrueCreateShaderResourceView(This, pResource, pDesc, ppSRView);
+}
 
 DXGI_FORMAT TextureFormatToDXGIFormat(ovrTextureFormat format)
 {
@@ -47,11 +127,11 @@ DXGI_FORMAT TextureFormatToDXGIFormat(ovrTextureFormat format)
 		case OVR_FORMAT_B5G5R5A1_UNORM:       return DXGI_FORMAT_B5G5R5A1_UNORM;
 		case OVR_FORMAT_B4G4R4A4_UNORM:       return DXGI_FORMAT_B4G4R4A4_UNORM;
 		case OVR_FORMAT_R8G8B8A8_UNORM:       return DXGI_FORMAT_R8G8B8A8_UNORM;
-		case OVR_FORMAT_R8G8B8A8_UNORM_SRGB:  return DXGI_FORMAT_R8G8B8A8_UNORM;
+		case OVR_FORMAT_R8G8B8A8_UNORM_SRGB:  return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
 		case OVR_FORMAT_B8G8R8A8_UNORM:       return DXGI_FORMAT_B8G8R8A8_UNORM;
-		case OVR_FORMAT_B8G8R8A8_UNORM_SRGB:  return DXGI_FORMAT_B8G8R8A8_UNORM;
+		case OVR_FORMAT_B8G8R8A8_UNORM_SRGB:  return DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
 		case OVR_FORMAT_B8G8R8X8_UNORM:       return DXGI_FORMAT_R8G8B8A8_UNORM;
-		case OVR_FORMAT_B8G8R8X8_UNORM_SRGB:  return DXGI_FORMAT_B8G8R8A8_UNORM;
+		case OVR_FORMAT_B8G8R8X8_UNORM_SRGB:  return DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
 		case OVR_FORMAT_R16G16B16A16_FLOAT:   return DXGI_FORMAT_R16G16B16A16_FLOAT;
 		case OVR_FORMAT_R11G11B10_FLOAT:      return DXGI_FORMAT_R11G11B10_FLOAT;
 
@@ -77,39 +157,22 @@ DXGI_FORMAT TextureFormatToDXGIFormat(ovrTextureFormat format)
 	}
 }
 
-D3D11_RTV_DIMENSION DescToViewDimension(const ovrTextureSwapChainDesc* desc)
+D3D_SRV_DIMENSION DescToViewDimension(const ovrTextureSwapChainDesc* desc)
 {
 	if (desc->ArraySize > 1)
 	{
 		if (desc->SampleCount > 1)
-			return D3D11_RTV_DIMENSION_TEXTURE2DMSARRAY;
+			return D3D_SRV_DIMENSION_TEXTURE2DMSARRAY;
 		else
-			return D3D11_RTV_DIMENSION_TEXTURE2DARRAY;
+			return D3D_SRV_DIMENSION_TEXTURE2DARRAY;
 	}
 	else
 	{
 		if (desc->SampleCount > 1)
-			return D3D11_RTV_DIMENSION_TEXTURE2DMS;
+			return D3D_SRV_DIMENSION_TEXTURE2DMS;
 		else
-			return D3D11_RTV_DIMENSION_TEXTURE2D;
+			return D3D_SRV_DIMENSION_TEXTURE2D;
 	}
-}
-
-HRESULT WINAPI HookCreateRenderTargetView(
-	ID3D11Device						*pDevice,
-	ID3D11Resource                      *pResource,
-	const D3D11_RENDER_TARGET_VIEW_DESC *pDesc,
-	ID3D11RenderTargetView              **ppSRView
-)
-{
-	D3D11_RENDER_TARGET_VIEW_DESC desc;
-	UINT size = (UINT)sizeof(desc);
-	if (!pDesc && SUCCEEDED(pResource->GetPrivateData(RXR_RTV_DESC, &size, &desc)))
-	{
-		return TrueCreateRenderTargetView(pDevice, pResource, &desc, ppSRView);
-	}
-
-	return TrueCreateRenderTargetView(pDevice, pResource, pDesc, ppSRView);
 }
 
 OVR_PUBLIC_FUNCTION(ovrResult) ovr_CreateTextureSwapChainDX(ovrSession session,
@@ -122,96 +185,136 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_CreateTextureSwapChainDX(ovrSession session,
 	if (!session)
 		return ovrError_InvalidSession;
 
-	if (!d3dPtr || !desc || !out_TextureSwapChain || desc->Type != ovrTexture_2D)
+	if (!d3dPtr || !desc || !out_TextureSwapChain || desc->Type == ovrTexture_2D_External)
 		return ovrError_InvalidParameter;
+
+	if (desc->Type == ovrTexture_Cube && !Runtime::Get().CompositionCube)
+		return ovrError_Unsupported;
+
+	ID3D11Device* pDevice = nullptr;
+	ID3D12CommandQueue* pQueue = nullptr;
+	if (FAILED(d3dPtr->QueryInterface(&pDevice)))
+	{
+		if (FAILED(d3dPtr->QueryInterface(&pQueue)))
+			return ovrError_InvalidParameter;
+	}
 
 	if (!session->Session)
 	{
-		ID3D11Device* pDevice = nullptr;
-		HRESULT hr = d3dPtr->QueryInterface(&pDevice);
-		if (FAILED(hr))
-			return ovrError_InvalidParameter;
+		if (pDevice)
+		{
+			XR_FUNCTION(session->Instance, GetD3D11GraphicsRequirementsKHR);
+			XrGraphicsRequirementsD3D11KHR graphicsReq = XR_TYPE(GRAPHICS_REQUIREMENTS_D3D11_KHR);
+			CHK_XR(GetD3D11GraphicsRequirementsKHR(session->Instance, session->System, &graphicsReq));
 
-		// Install a hook on CreateRenderTargetView so we can ensure NULL descriptors keep working on typeless formats
-		// This fixes Echo Arena.
-		DetourTransactionBegin();
-		DetourUpdateThread(GetCurrentThread());
-		DetourVirtual(pDevice, 9, (PVOID*)&TrueCreateRenderTargetView, HookCreateRenderTargetView);
-		DetourTransactionCommit();
-		session->HookedFunction = std::make_pair((PVOID*)&TrueCreateRenderTargetView, HookCreateRenderTargetView);
+			if (pDevice->GetFeatureLevel() < graphicsReq.minFeatureLevel)
+				return ovrError_IncompatibleGPU;
 
-		XrGraphicsBindingD3D11KHR graphicsBinding = XR_TYPE(GRAPHICS_BINDING_D3D11_KHR);
-		graphicsBinding.device = pDevice;
+			DetourTransactionBegin();
+			DetourUpdateThread(GetCurrentThread());
+			if (Runtime::Get().UseHack(Runtime::HACK_HOOK_CREATE_TEXTURE))
+			{
+				DetourVirtual(pDevice, 5, (PVOID*)&TrueCreateTexture2D, HookCreateTexture2D);
+				session->HookedFunctions.insert(std::make_pair((PVOID*)&TrueCreateTexture2D, HookCreateTexture2D));
+			}
+			// Install a hook D3D11 functions so we can ensure NULL descriptors keep working on typeless formats
+			// This fixes Echo Arena, among others. May need to port this hack to D3D12 in the future.
+			DetourVirtual(pDevice, 7, (PVOID*)&TrueCreateShaderResourceView, HookCreateShaderResourceView);
+			session->HookedFunctions.insert(std::make_pair((PVOID*)&TrueCreateShaderResourceView, HookCreateShaderResourceView));
+			DetourVirtual(pDevice, 9, (PVOID*)&TrueCreateRenderTargetView, HookCreateRenderTargetView);
+			session->HookedFunctions.insert(std::make_pair((PVOID*)&TrueCreateRenderTargetView, HookCreateRenderTargetView));
+			DetourTransactionCommit();
 
-		XrSessionCreateInfo createInfo = XR_TYPE(SESSION_CREATE_INFO);
-		createInfo.next = &graphicsBinding;
-		createInfo.systemId = session->System;
-		CHK_XR(xrCreateSession(session->Instance, &createInfo, &session->Session));
+			XrGraphicsBindingD3D11KHR graphicsBinding = XR_TYPE(GRAPHICS_BINDING_D3D11_KHR);
+			graphicsBinding.device = pDevice;
+			session->BeginSession(&graphicsBinding);
+		}
+		else if (pQueue)
+		{
+			if (!Runtime::Get().Supports(XR_KHR_D3D12_ENABLE_EXTENSION_NAME))
+				return ovrError_Unsupported;
 
-		// Attach it to the InputManager
-		session->Input->AttachSession(session->Session);
+			ID3D12Device* pDevice12 = nullptr;
+			if (FAILED(pQueue->GetDevice(__uuidof(*pDevice12), reinterpret_cast<void**>(&pDevice12))))
+				return ovrError_RuntimeException;
 
-		// Create reference spaces
-		XrReferenceSpaceCreateInfo spaceInfo = XR_TYPE(REFERENCE_SPACE_CREATE_INFO);
-		spaceInfo.poseInReferenceSpace = XR::Posef::Identity();
-		spaceInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
-		CHK_XR(xrCreateReferenceSpace(session->Session, &spaceInfo, &session->ViewSpace));
-		spaceInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL;
-		CHK_XR(xrCreateReferenceSpace(session->Session, &spaceInfo, &session->LocalSpace));
-		spaceInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_STAGE;
-		CHK_XR(xrCreateReferenceSpace(session->Session, &spaceInfo, &session->StageSpace));
-		session->CalibratedOrigin = OVR::Posef::Identity();
+			XR_FUNCTION(session->Instance, GetD3D12GraphicsRequirementsKHR);
+			XrGraphicsRequirementsD3D12KHR graphicsReq = XR_TYPE(GRAPHICS_REQUIREMENTS_D3D12_KHR);
+			CHK_XR(GetD3D12GraphicsRequirementsKHR(session->Instance, session->System, &graphicsReq));
 
-		XrSessionBeginInfo beginInfo = XR_TYPE(SESSION_BEGIN_INFO);
-		beginInfo.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
-		CHK_XR(xrBeginSession(session->Session, &beginInfo));
+			static const D3D_FEATURE_LEVEL featureLevels[] = { graphicsReq.minFeatureLevel };
+			D3D12_FEATURE_DATA_FEATURE_LEVELS levels = { 1, featureLevels };
+			pDevice12->CheckFeatureSupport(D3D12_FEATURE_FEATURE_LEVELS, &levels, sizeof(levels));
 
-		CHK_OVR(ovr_WaitToBeginFrame(session, 0));
-		CHK_OVR(ovr_BeginFrame(session, 0));
+			if (levels.MaxSupportedFeatureLevel < graphicsReq.minFeatureLevel)
+				return ovrError_IncompatibleGPU;
+
+			XrGraphicsBindingD3D12KHR graphicsBinding = XR_TYPE(GRAPHICS_BINDING_D3D12_KHR);
+			graphicsBinding.device = pDevice12;
+			graphicsBinding.queue = pQueue;
+			session->BeginSession(&graphicsBinding);
+		}
+		else
+		{
+			return ovrError_RuntimeException;
+		}
 	}
 
-	// Enumerate formats
-	uint32_t formatCount = 0;
-	xrEnumerateSwapchainFormats(session->Session, 0, &formatCount, nullptr);
-	std::vector<int64_t> formats;
-	formats.resize(formatCount);
-	xrEnumerateSwapchainFormats(session->Session, (uint32_t)formats.size(), &formatCount, formats.data());
-	assert(formats.size() == formatCount);
-
-	ovrTextureSwapChain swapChain = new ovrTextureSwapChainData();
-
-	// Check if the format is supported
-	swapChain->Format = TextureFormatToDXGIFormat(desc->Format);
-
-	if (std::find(formats.begin(), formats.end(), swapChain->Format) == formats.end()) {
-		swapChain->Format = formats[0];
-		if (session->Details->UseHack(SessionDetails::HACK_WMR_SRGB))
-			swapChain->Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+	DXGI_FORMAT format = TextureFormatToDXGIFormat(desc->Format);
+	if (format == DXGI_FORMAT_R11G11B10_FLOAT)
+	{
+		if (Runtime::Get().UseHack(Runtime::HACK_NO_11BIT_FORMAT))
+			format = DXGI_FORMAT_R10G10B10A2_UNORM;
+		else if (Runtime::Get().UseHack(Runtime::HACK_NO_10BIT_FORMAT))
+			format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+	}
+	else if ((format == DXGI_FORMAT_R8G8B8A8_UNORM || format == DXGI_FORMAT_B8G8R8A8_UNORM) &&
+		Runtime::Get().UseHack(Runtime::HACK_NO_8BIT_LINEAR))
+	{
+		if (format == DXGI_FORMAT_R8G8B8A8_UNORM)
+			format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+		else
+			format = DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
 	}
 
-	swapChain->Desc = *desc;
-	XrSwapchainCreateInfo createInfo = DescToCreateInfo(desc, swapChain->Format);
-	CHK_XR(xrCreateSwapchain(session->Session, &createInfo, &swapChain->Swapchain));
+	if (pDevice)
+	{
+		ovrTextureSwapChain chain;
+		g_SwapChainDesc = desc;
+		CHK_OVR(CreateSwapChain(session->Session, desc, format, &chain));
+		g_SwapChainDesc = nullptr;
+		CHK_OVR(EnumerateImages<XrSwapchainImageD3D11KHR>(XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR, chain));
 
-	CHK_XR(xrEnumerateSwapchainImages(swapChain->Swapchain, 0, &swapChain->Length, nullptr));
-	XrSwapchainImageD3D11KHR* images = new XrSwapchainImageD3D11KHR[swapChain->Length];
-	for (uint32_t i = 0; i < swapChain->Length; i++)
-		images[i] = XR_TYPE(SWAPCHAIN_IMAGE_D3D11_KHR);
-	swapChain->Images = (XrSwapchainImageBaseHeader*)images;
+		// If the app doesn't expect a typeless texture we need to attach the fully qualified format to each texture.
+		if (!(desc->MiscFlags & ovrTextureMisc_DX_Typeless))
+		{
+			CD3D11_SHADER_RESOURCE_VIEW_DESC srv(DescToViewDimension(&chain->Desc), format);
+			CD3D11_RENDER_TARGET_VIEW_DESC rtv((D3D11_RTV_DIMENSION)DescToViewDimension(&chain->Desc), format);
 
-	uint32_t finalLength;
-	CHK_XR(xrEnumerateSwapchainImages(swapChain->Swapchain, swapChain->Length, &finalLength, swapChain->Images));
-	assert(swapChain->Length == finalLength);
+			for (uint32_t i = 0; i < chain->Length; i++)
+			{
+				XrSwapchainImageD3D11KHR image = ((XrSwapchainImageD3D11KHR*)chain->Images)[i];
 
-	XrSwapchainImageAcquireInfo acqInfo = XR_TYPE(SWAPCHAIN_IMAGE_ACQUIRE_INFO);
-	CHK_XR(xrAcquireSwapchainImage(swapChain->Swapchain, &acqInfo, &swapChain->CurrentIndex));
+				HRESULT hr = image.texture->SetPrivateData(RXR_SRV_DESC, sizeof(CD3D11_SHADER_RESOURCE_VIEW_DESC), &srv);
+				if (SUCCEEDED(hr))
+					hr = image.texture->SetPrivateData(RXR_RTV_DESC, sizeof(D3D11_RENDER_TARGET_VIEW_DESC), &rtv);
+				if (FAILED(hr))
+					return ovrError_RuntimeException;
+			}
+		}
 
-	XrSwapchainImageWaitInfo waitInfo = XR_TYPE(SWAPCHAIN_IMAGE_WAIT_INFO);
-	waitInfo.timeout = XR_NO_DURATION;
-	CHK_XR(xrWaitSwapchainImage(swapChain->Swapchain, &waitInfo));
-
-	*out_TextureSwapChain = swapChain;
-	return ovrSuccess;
+		*out_TextureSwapChain = chain;
+		return ovrSuccess;
+	}
+	else if (pQueue)
+	{
+		CHK_OVR(CreateSwapChain(session->Session, desc, format, out_TextureSwapChain));
+		return EnumerateImages<XrSwapchainImageD3D12KHR>(XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR, *out_TextureSwapChain);
+	}
+	else
+	{
+		return ovrError_RuntimeException;
+	}
 }
 
 OVR_PUBLIC_FUNCTION(ovrResult) ovr_GetTextureSwapChainBufferDX(ovrSession session,
@@ -233,31 +336,7 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_GetTextureSwapChainBufferDX(ovrSession sessio
 
 	XrSwapchainImageD3D11KHR image = ((XrSwapchainImageD3D11KHR*)chain->Images)[index];
 
-	D3D11_RENDER_TARGET_VIEW_DESC desc;
-	// Under WMR we should always render sRGB even when the swapchain
-	// format is linear to compensate for mishandled gamma in the runtime
-	if (session->Details->UseHack(SessionDetails::HACK_WMR_SRGB)
-	    && chain->Format == DXGI_FORMAT_R8G8B8A8_UNORM)
-		desc.Format = (DXGI_FORMAT) DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
-	else
-		desc.Format = (DXGI_FORMAT) chain->Format;
-	desc.ViewDimension = DescToViewDimension(&chain->Desc);
-	if (desc.ViewDimension == D3D11_RTV_DIMENSION_TEXTURE2DMSARRAY)
-	{
-		desc.Texture2DMSArray.FirstArraySlice = 0;
-		desc.Texture2DMSArray.ArraySize = chain->Desc.ArraySize;
-	}
-	else
-	{
-		desc.Texture2DArray.MipSlice = 0;
-		desc.Texture2DArray.FirstArraySlice = 0;
-		desc.Texture2DArray.ArraySize = chain->Desc.ArraySize;
-	}
-	HRESULT hr = image.texture->SetPrivateData(RXR_RTV_DESC, sizeof(D3D11_RENDER_TARGET_VIEW_DESC), &desc);
-	if (FAILED(hr))
-		return ovrError_RuntimeException;
-
-	hr = image.texture->QueryInterface(iid, out_Buffer);
+	HRESULT hr = image.texture->QueryInterface(iid, out_Buffer);
 	if (FAILED(hr))
 		return ovrError_InvalidParameter;
 

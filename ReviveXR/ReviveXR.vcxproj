@@ -1,9 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|Win32">
+      <Configuration>Debug</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
     <ProjectConfiguration Include="Debug|x64">
       <Configuration>Debug</Configuration>
       <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32">
+      <Configuration>Release</Configuration>
+      <Platform>Win32</Platform>
     </ProjectConfiguration>
     <ProjectConfiguration Include="Release|x64">
       <Configuration>Release</Configuration>
@@ -22,7 +30,20 @@
     <PlatformToolset>v141</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v141</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v141</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
     <ConfigurationType>DynamicLibrary</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
     <PlatformToolset>v141</PlatformToolset>
@@ -38,18 +59,44 @@
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
     <Import Project="..\Common.props" />
   </ImportGroup>
+  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+    <Import Project="..\Common.props" />
+  </ImportGroup>
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+    <Import Project="..\Common.props" />
+  </ImportGroup>
+  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="PropertySheets">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
     <Import Project="..\Common.props" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <TargetName>LibRXRRT64</TargetName>
+    <TargetName>LibReviveXR64</TargetName>
     <OutDir>$(SolutionDir)$(Configuration)\</OutDir>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <TargetName>LibReviveXR32</TargetName>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <TargetName>LibRXRRT64</TargetName>
+    <TargetName>LibReviveXR64</TargetName>
     <OutDir>$(SolutionDir)$(Configuration)\</OutDir>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <TargetName>LibReviveXR32</TargetName>
+  </PropertyGroup>
+  <PropertyGroup Label="Vcpkg" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <VcpkgUseStatic>true</VcpkgUseStatic>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Vcpkg">
+    <VcpkgUseStatic>true</VcpkgUseStatic>
+  </PropertyGroup>
+  <PropertyGroup Label="Vcpkg" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <VcpkgUseStatic>true</VcpkgUseStatic>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Vcpkg">
+    <VcpkgUseStatic>true</VcpkgUseStatic>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
@@ -57,14 +104,14 @@
       <Optimization>Disabled</Optimization>
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>XR_USE_PLATFORM_WIN32;VK_NO_PROTOTYPES;VK_USE_PLATFORM_WIN32_KHR;NOMINMAX;MICROPROFILE_ENABLED=1;MICROPROFILE_GPU_TIMERS=0;OVR_DLL_BUILD;DEBUG;_CRT_SECURE_NO_WARNINGS;_MBCS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>$(Externals)microprofile;$(Externals)Detours\src;$(Externals)openxr\include;$(Externals)LibOVR\Include;$(Externals)glad\include;$(Externals)Vulkan\include;..\ReviveOverlay;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(Externals)microprofile;$(Externals)openxr\include;$(Externals)LibOVR\Include;$(Externals)glad\include;$(Externals)Vulkan\include;..\ReviveOverlay;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
     </ClCompile>
     <Link>
       <AdditionalLibraryDirectories>$(Externals)openxr\src\loader\$(Configuration)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>Ws2_32.lib;openxr_loader.lib;opengl32.lib;d3d11.lib;dxgi.lib;dxguid.lib;dsound.lib;Winmm.lib;Shlwapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>Ws2_32.lib;openxr_loader.lib;opengl32.lib;d3d11.lib;dxgi.lib;dxguid.lib;dsound.lib;Winmm.lib;Shlwapi.lib;Pathcch.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <ImportLibrary>$(IntDir)$(TargetName).lib</ImportLibrary>
-      <IgnoreSpecificDefaultLibraries>libcmt.lib</IgnoreSpecificDefaultLibraries>
+      <ModuleDefinitionFile>ReviveXR.def</ModuleDefinitionFile>
     </Link>
     <FxCompile>
       <HeaderFileOutput>%(Filename).hlsl.h</HeaderFileOutput>
@@ -79,9 +126,38 @@
       <AdditionalIncludeDirectories>$(Externals)LibOVR\Include</AdditionalIncludeDirectories>
     </ResourceCompile>
     <PostBuildEvent />
-    <PostBuildEvent>
-      <Command>copy /Y "$(VcpkgCurrentInstalledDir)bin\openxr_loader.dll"  "$(TargetDir)"</Command>
-    </PostBuildEvent>
+    <PostBuildEvent />
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <Optimization>Disabled</Optimization>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>XR_USE_PLATFORM_WIN32;VK_NO_PROTOTYPES;VK_USE_PLATFORM_WIN32_KHR;NOMINMAX;MICROPROFILE_ENABLED=1;MICROPROFILE_GPU_TIMERS=0;OVR_DLL_BUILD;DEBUG;_CRT_SECURE_NO_WARNINGS;_MBCS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(Externals)microprofile;$(Externals)openxr\include;$(Externals)LibOVR\Include;$(Externals)glad\include;$(Externals)Vulkan\include;..\ReviveOverlay;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+    </ClCompile>
+    <Link>
+      <AdditionalLibraryDirectories>$(Externals)openxr\src\loader\$(Configuration)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>Ws2_32.lib;openxr_loader.lib;opengl32.lib;d3d11.lib;dxgi.lib;dxguid.lib;dsound.lib;Winmm.lib;Shlwapi.lib;Pathcch.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <ImportLibrary>$(IntDir)$(TargetName).lib</ImportLibrary>
+      <ModuleDefinitionFile>ReviveXR.def</ModuleDefinitionFile>
+    </Link>
+    <FxCompile>
+      <HeaderFileOutput>%(Filename).hlsl.h</HeaderFileOutput>
+    </FxCompile>
+    <FxCompile>
+      <ObjectFileOutput>
+      </ObjectFileOutput>
+      <ShaderModel>4.0</ShaderModel>
+      <VariableName>g_%(Filename)</VariableName>
+    </FxCompile>
+    <PostBuildEvent />
+    <ResourceCompile>
+      <AdditionalIncludeDirectories>$(Externals)LibOVR\Include</AdditionalIncludeDirectories>
+    </ResourceCompile>
+    <PostBuildEvent />
+    <PostBuildEvent />
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -90,16 +166,17 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>XR_USE_PLATFORM_WIN32;VK_NO_PROTOTYPES;VK_USE_PLATFORM_WIN32_KHR;NOMINMAX;MICROPROFILE_ENABLED=0;MICROPROFILE_GPU_TIMERS=0;OVR_DLL_BUILD;NDEBUG;_CRT_SECURE_NO_WARNINGS;_MBCS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>$(Externals)microprofile;$(Externals)Detours\src;$(Externals)openxr\include;$(Externals)LibOVR\Include;$(Externals)glad\include;$(Externals)Vulkan\include;..\ReviveOverlay;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>XR_USE_PLATFORM_WIN32;VK_NO_PROTOTYPES;VK_USE_PLATFORM_WIN32_KHR;NOMINMAX;MICROPROFILE_ENABLED=0;MICROPROFILE_GPU_TIMERS=0;OVR_DLL_BUILD;_CRT_SECURE_NO_WARNINGS;_MBCS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(Externals)microprofile;$(Externals)openxr\include;$(Externals)LibOVR\Include;$(Externals)glad\include;$(Externals)Vulkan\include;..\ReviveOverlay;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
     </ClCompile>
     <Link>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <AdditionalLibraryDirectories>$(Externals)openxr\src\loader\$(Configuration)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>Ws2_32.lib;openxr_loader.lib;opengl32.lib;d3d11.lib;dxgi.lib;dxguid.lib;dsound.lib;Winmm.lib;Shlwapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>Ws2_32.lib;openxr_loader.lib;opengl32.lib;d3d11.lib;dxgi.lib;dxguid.lib;dsound.lib;Winmm.lib;Shlwapi.lib;Pathcch.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <ImportLibrary>$(IntDir)$(TargetName).lib</ImportLibrary>
+      <ModuleDefinitionFile>ReviveXR.def</ModuleDefinitionFile>
     </Link>
     <FxCompile>
       <HeaderFileOutput>%(Filename).hlsl.h</HeaderFileOutput>
@@ -114,21 +191,51 @@
       <AdditionalIncludeDirectories>$(Externals)LibOVR\Include</AdditionalIncludeDirectories>
     </ResourceCompile>
     <PostBuildEvent />
-    <PostBuildEvent>
-      <Command>copy /Y "$(VcpkgCurrentInstalledDir)bin\openxr_loader.dll"  "$(TargetDir)"</Command>
-    </PostBuildEvent>
+    <PostBuildEvent />
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <Optimization>MaxSpeed</Optimization>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>XR_USE_PLATFORM_WIN32;VK_NO_PROTOTYPES;VK_USE_PLATFORM_WIN32_KHR;NOMINMAX;MICROPROFILE_ENABLED=0;MICROPROFILE_GPU_TIMERS=0;OVR_DLL_BUILD;_CRT_SECURE_NO_WARNINGS;_MBCS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(Externals)microprofile;$(Externals)openxr\include;$(Externals)LibOVR\Include;$(Externals)glad\include;$(Externals)Vulkan\include;..\ReviveOverlay;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+    </ClCompile>
+    <Link>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <AdditionalLibraryDirectories>$(Externals)openxr\src\loader\$(Configuration)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>Ws2_32.lib;openxr_loader.lib;opengl32.lib;d3d11.lib;dxgi.lib;dxguid.lib;dsound.lib;Winmm.lib;Shlwapi.lib;Pathcch.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <ImportLibrary>$(IntDir)$(TargetName).lib</ImportLibrary>
+      <ModuleDefinitionFile>ReviveXR.def</ModuleDefinitionFile>
+    </Link>
+    <FxCompile>
+      <HeaderFileOutput>%(Filename).hlsl.h</HeaderFileOutput>
+    </FxCompile>
+    <FxCompile>
+      <ObjectFileOutput>
+      </ObjectFileOutput>
+      <ShaderModel>4.0</ShaderModel>
+      <VariableName>g_%(Filename)</VariableName>
+    </FxCompile>
+    <PostBuildEvent />
+    <ResourceCompile>
+      <AdditionalIncludeDirectories>$(Externals)LibOVR\Include</AdditionalIncludeDirectories>
+    </ResourceCompile>
+    <PostBuildEvent />
+    <PostBuildEvent />
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="..\microprofile\microprofile.h" />
     <ClInclude Include="..\microprofile\microprofiledraw.h" />
     <ClInclude Include="..\microprofile\microprofilehtml.h" />
     <ClInclude Include="..\microprofile\microprofileui.h" />
-    <ClInclude Include="CImg.h" />
-    <ClInclude Include="Debug.h" />
-    <ClInclude Include="Extensions.h" />
     <ClInclude Include="HapticsBuffer.h" />
     <ClInclude Include="OVR_CAPI.h" />
-    <ClInclude Include="SessionDetails.h" />
+    <ClInclude Include="Runtime.h" />
     <ClInclude Include="XR_Math.h" />
     <ClInclude Include="InputManager.h" />
     <ClInclude Include="Session.h" />
@@ -148,22 +255,17 @@
     <ClCompile Include="REV_CAPI_Audio.cpp" />
     <ClCompile Include="REV_CAPI_D3D.cpp" />
     <ClCompile Include="REV_CAPI_GL.cpp" />
-    <ClCompile Include="SessionDetails.cpp" />
+    <ClCompile Include="Session.cpp" />
+    <ClCompile Include="Runtime.cpp" />
     <ClCompile Include="Swapchain.cpp" />
-    <ClCompile Include="Extensions.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="cpp.hint" />
+    <None Include="ReviveXR.def" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="Revive.rc" />
   </ItemGroup>
-  <ItemGroup>
-    <ProjectReference Include="..\Externals\Detours.vcxproj">
-      <Project>{8776bf45-11e0-4e82-9480-c9316cab5c42}</Project>
-    </ProjectReference>
-  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
-  <ImportGroup Label="ExtensionTargets">
-  </ImportGroup>
+  <ImportGroup Label="ExtensionTargets" />
 </Project>

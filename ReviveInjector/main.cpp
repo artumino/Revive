@@ -8,7 +8,7 @@
 #include <Shlobj.h>
 #include <Shlwapi.h>
 #include <openvr.h>
-#include <detours.h>
+#include <detours/detours.h>
 
 extern FILE* g_LogFile;
 #define LOG(x, ...) if (g_LogFile) fprintf(g_LogFile, x, __VA_ARGS__); \
@@ -204,10 +204,10 @@ int wmain(int argc, wchar_t *argv[]) {
 	wchar_t path[MAX_PATH] = { 0 };
 	for (int i = 1; i < argc; i++)
 	{
-		if (wcscmp(argv[i], L"/xr") == 0)
+		if (wcscmp(argv[i], L"/legacy") == 0)
 		{
-			dlls.add(moduleDir + std::string("\\openxr_loader.dll"));
-			dlls.add(moduleDir + std::string("\\LibRXRRT64.dll"));
+			dlls.add(moduleDir + std::string("\\openvr_api64.dll"));
+			dlls.add(moduleDir + std::string("\\LibRevive64.dll"));
 		}
 		else if (wcscmp(argv[i], L"/app") == 0)
 		{
@@ -239,8 +239,7 @@ int wmain(int argc, wchar_t *argv[]) {
 
 	if (dlls.empty())
 	{
-		dlls.add(moduleDir + std::string("\\openvr_api64.dll"));
-		dlls.add(moduleDir + std::string("\\LibRevive64.dll"));
+		dlls.add(moduleDir + std::string("\\LibReviveXR64.dll"));
 	}
 	
 	LOG("Command for injector is: %ls\n", path);

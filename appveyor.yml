@@ -5,10 +5,16 @@ environment:
   QTDIR: C:\Qt\5.13.2\msvc2017_64
 
 install:
+  # update vcpkg to the latest version
+  - cd C:\Tools\vcpkg
+  - git pull
+  - git apply %APPVEYOR_BUILD_FOLDER%\fix-vcpkg-openxr-static-loader.patch
+  - .\bootstrap-vcpkg.bat
+  - cd %APPVEYOR_BUILD_FOLDER%
   - git submodule update --init --recursive
   - mkdir c:\projects\download_cache
   # query Oculus SDK website for download link
-  - curl -fsSL -o c:\projects\download_cache\oculus_sdk.html https://developer.oculus.com/downloads/package/oculus-sdk-for-windows/1.41.0/
+  - curl -fsSL -o c:\projects\download_cache\oculus_sdk.html https://developer.oculus.com/downloads/package/oculus-sdk-for-windows/23.0.0/
   # download and extract Oculus SDK
   - ps: |
       $url = select-string -Path 'c:\projects\download_cache\oculus_sdk.html'  -Pattern 'https:\/\/securecdn\.oculus\.com\/binaries\/download\/\?id=[0-9]+&amp;access_token=[0-9A-Za-z%]+' -AllMatches | % {$_.Matches} | % {$_.Value}
@@ -27,9 +33,8 @@ build_script:
   # Ensure vcpkg dependencies are installed
   - ps: |
       vcpkg integrate install
-      vcpkg install openxr-loader:x64-windows glfw3:x64-windows-static glfw3:x86-windows-static
-      mkdir C:\projects\Revive\ReviveXR\bin
-      copy C:\Tools\vcpkg\installed\x64-windows\bin\openxr_loader.dll C:\projects\Revive\ReviveXR\bin\openxr_loader.dll
+      vcpkg install --triplet x86-windows-static detours openxr-loader glfw3
+      vcpkg install --triplet x64-windows-static detours openxr-loader glfw3
   # build Revive
   - ps: |
       cd c:\projects\revive
@@ -47,7 +52,7 @@ after_build:
   # gather built Revive files
   - cmd: |
       cd c:\projects\Revive\Release
-      7z a Revive.zip ReviveInjector.exe LibRevive32.dll LibRevive64.dll LibRXRRT64.dll openxr_loader.dll
+      7z a Revive.zip ReviveInjector.exe LibRevive32.dll LibRevive64.dll LibReviveXR64.dll LibReviveXR32.dll
   # Run NSIS to generate installer
   - ps: |
       cd c:\projects\Revive\Installer

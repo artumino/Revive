@@ -2,11 +2,16 @@
 
 #include <OVR_CAPI.h>
 #include <openxr/openxr.h>
+#include <atomic>
+#include <condition_variable>
+#include <map>
 #include <memory>
+#include <mutex>
+#include <list>
+#include <vector>
 #include <utility>
 
-#include "SessionDetails.h"
-
+class Runtime;
 class InputManager;
 
 struct SessionStatusBits {
@@ -20,10 +25,20 @@ struct SessionStatusBits {
 	bool OverlayPresent : 1;
 };
 
+typedef struct XrIndexedFrameState : public XrFrameState
+{
+	long long frameIndex;
+} XrIndexedFrameState;
+
+typedef std::pair<std::vector<XrVector2f>,
+	std::vector<uint32_t>> VisibilityMask;
+
 struct ovrHmdStruct
 {
-	long long NextFrame;
-	std::pair<void**, void*> HookedFunction;
+	std::pair<std::mutex,
+		std::condition_variable> Running;
+
+	std::map<void**, void*> HookedFunctions;
 
 	// OpenXR handles
 	XrInstance Instance;
@@ -32,22 +47,34 @@ struct ovrHmdStruct
 	XrSpace ViewSpace;
 	XrSpace	LocalSpace;
 	XrSpace StageSpace;
-	XrFrameState CurrentFrame;
-	XrFrameState PendingFrame;
+
+	// Frame state
+	XrIndexedFrameState FrameStats[ovrMaxProvidedFrameStats];
+	std::atomic<XrIndexedFrameState*> CurrentFrame;
+	ovrGraphicsLuid Adapter;
 
 	// OpenXR properties
 	XrSystemProperties SystemProperties;
 	XrReferenceSpaceType TrackingSpace;
 	XrViewConfigurationView ViewConfigs[ovrEye_Count];
-	XrView DefaultEyeViews[ovrEye_Count];
+	XrViewConfigurationViewFovEPIC ViewFov[ovrEye_Count];
+	XrView ViewPoses[ovrEye_Count];
+	ovrVector2f PixelsPerTan[ovrEye_Count];
 
 	// Session status
 	SessionStatusBits SessionStatus;
 	ovrPosef CalibratedOrigin;
 
-	// Hacks
-	std::unique_ptr<SessionDetails> Details;
+	// Field-of-view stencil
+	std::map<XrVisibilityMaskTypeKHR, VisibilityMask> VisibilityMasks[ovrEye_Count];
 
 	// Input
 	std::unique_ptr<InputManager> Input;
+
+	ovrResult InitSession(XrInstance instance);
+	ovrResult BeginSession(void* graphicsBinding, bool beginFrame = true);
+	ovrResult EndSession();
+
+	ovrResult UpdateStencil(ovrEyeType view, XrVisibilityMaskTypeKHR type);
+	ovrResult LocateViews(XrView out_Views[ovrEye_Count], XrViewStateFlags* out_Flags = nullptr) const;
 };

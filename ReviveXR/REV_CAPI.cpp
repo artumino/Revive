@@ -6,34 +6,62 @@
 
 #include "Common.h"
 #include "Session.h"
+#include "Runtime.h"
 #include "InputManager.h"
 #include "SwapChain.h"
-#include "Extensions.h"
 
-#define XR_USE_GRAPHICS_API_D3D11
-#include <d3d11.h>
-#include <dxgi1_2.h>
+#include <Windows.h>
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
-#include <Windows.h>
 #include <list>
 #include <vector>
 #include <algorithm>
 #include <thread>
-#include <wrl/client.h>
-#include <detours.h>
-
-#define REV_DEFAULT_TIMEOUT 10000
+#include <chrono>
+#include <detours/detours.h>
 
 XrInstance g_Instance = XR_NULL_HANDLE;
-uint32_t g_MinorVersion = OVR_MINOR_VERSION;
 std::list<ovrHmdStruct> g_Sessions;
-Extensions g_Extensions;
+
+using namespace std::chrono_literals;
+
+bool LoadRenderDoc()
+{
+	LONG error = ERROR_SUCCESS;
+
+	// Open the libraries key
+	char keyPath[MAX_PATH] = { "RenderDoc.RDCCapture.1\\DefaultIcon" };
+	HKEY iconKey;
+	error = RegOpenKeyExA(HKEY_CLASSES_ROOT, keyPath, 0, KEY_READ, &iconKey);
+	if (error != ERROR_SUCCESS)
+		return false;
+
+	// Get the default library
+	char path[MAX_PATH];
+	DWORD length = MAX_PATH;
+	error = RegQueryValueExA(iconKey, "", NULL, NULL, (PBYTE)path, &length);
+	RegCloseKey(iconKey);
+	if (error != ERROR_SUCCESS)
+		return false;
+
+	if (path[0] == '\0')
+		return false;
+
+	strcpy(strrchr(path, '\\') + 1, "renderdoc.dll");
+	return LoadLibraryA(path) != NULL;
+}
+
+void AttachDetours();
+void DetachDetours();
 
 OVR_PUBLIC_FUNCTION(ovrResult) ovr_Initialize(const ovrInitParams* params)
 {
 	if (g_Instance)
 		return ovrSuccess;
+
+#if 0
+	LoadRenderDoc();
+#endif
 
 	MicroProfileOnThreadCreate("Main");
 	MicroProfileSetForceEnable(true);
@@ -41,21 +69,10 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_Initialize(const ovrInitParams* params)
 	MicroProfileSetForceMetaCounters(true);
 	MicroProfileWebServerStart();
 
-	g_MinorVersion = params->RequestedMinorVersion;
-
-	uint32_t size;
-	std::vector<XrExtensionProperties> properties;
-	CHK_XR(xrEnumerateInstanceExtensionProperties(nullptr, 0, &size, nullptr));
-	properties.resize(size);
-	for (XrExtensionProperties& props : properties)
-		props = XR_TYPE(EXTENSION_PROPERTIES);
-	CHK_XR(xrEnumerateInstanceExtensionProperties(nullptr, (uint32_t)properties.size(), &size, properties.data()));
-	g_Extensions.InitExtensionList(properties);
-
-	XrInstanceCreateInfo createInfo = g_Extensions.GetInstanceCreateInfo();
-	CHK_XR(xrCreateInstance(&createInfo, &g_Instance));
-
-	return ovrSuccess;
+	DetachDetours();
+	ovrResult rs = Runtime::Get().CreateInstance(&g_Instance, params);
+	AttachDetours();
+	return rs;
 }
 
 OVR_PUBLIC_FUNCTION(void) ovr_Shutdown()
@@ -107,7 +124,7 @@ OVR_PUBLIC_FUNCTION(ovrHmdDesc) ovr_GetHmdDesc(ovrSession session)
 {
 	REV_TRACE(ovr_GetHmdDesc);
 
-	ovrHmdDesc desc = { g_MinorVersion < 38 ? ovrHmd_CV1 : ovrHmd_RiftS };
+	ovrHmdDesc desc = { Runtime::Get().MinorVersion < 38 ? ovrHmd_CV1 : ovrHmd_RiftS };
 	if (!session)
 		return desc;
 
@@ -126,15 +143,22 @@ OVR_PUBLIC_FUNCTION(ovrHmdDesc) ovr_GetHmdDesc(ovrSession session)
 	for (int i = 0; i < ovrEye_Count; i++)
 	{
 		// Compensate for the 3-DOF eye pose on pre-1.17
-		if (g_MinorVersion < 17)
-			desc.DefaultEyeFov[i] = OVR::FovPort::Uncant(XR::FovPort(session->DefaultEyeViews[i].fov), XR::Quatf(session->DefaultEyeViews[i].pose.orientation));
+		if (Runtime::Get().MinorVersion < 17)
+		{
+			desc.DefaultEyeFov[i] = OVR::FovPort::Uncant(XR::FovPort(session->ViewPoses[i].fov), XR::Quatf(session->ViewPoses[i].pose.orientation));
+			desc.MaxEyeFov[i] = desc.DefaultEyeFov[i];
+		}
 		else
-			desc.DefaultEyeFov[i] = XR::FovPort(session->DefaultEyeViews[i].fov);
-		desc.MaxEyeFov[i] = desc.DefaultEyeFov[i];
+		{
+			desc.DefaultEyeFov[i] = XR::FovPort(session->ViewFov[i].recommendedFov);
+			desc.MaxEyeFov[i] = XR::FovPort(session->ViewFov[i].maxMutableFov);
+		}
 		desc.Resolution.w += (int)session->ViewConfigs[i].recommendedImageRectWidth;
 		desc.Resolution.h = std::max(desc.Resolution.h, (int)session->ViewConfigs[i].recommendedImageRectHeight);
 	}
-	desc.DisplayRefreshRate = session->PendingFrame.predictedDisplayPeriod > 0 ? 1e9f / session->PendingFrame.predictedDisplayPeriod : 90.0f;
+
+	XrIndexedFrameState* frame = session->CurrentFrame;
+	desc.DisplayRefreshRate = frame->predictedDisplayPeriod > 0 ? 1e9f / frame->predictedDisplayPeriod : 90.0f;
 	return desc;
 }
 
@@ -146,7 +170,7 @@ OVR_PUBLIC_FUNCTION(unsigned int) ovr_GetTrackerCount(ovrSession session)
 		return ovrError_InvalidSession;
 
 	// Pre-1.37 applications need virtual sensors to avoid a loss of tracking being detected
-	return g_MinorVersion < 37 ? 3 : 0;
+	return Runtime::Get().MinorVersion < 37 ? 3 : 0;
 }
 
 OVR_PUBLIC_FUNCTION(ovrTrackerDesc) ovr_GetTrackerDesc(ovrSession session, unsigned int trackerDescIndex)
@@ -171,110 +195,16 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_Create(ovrSession* pSession, ovrGraphicsLuid*
 	if (!pSession)
 		return ovrError_InvalidParameter;
 
-	XR_FUNCTION(g_Instance, GetD3D11GraphicsRequirementsKHR);
-
 	*pSession = nullptr;
 
-	// Initialize the opaque pointer with our own OpenVR-specific struct
+	// Initialize the opaque pointer with our own OpenXR-specific struct
 	g_Sessions.emplace_back();
-
-	// Initialize session members
 	ovrSession session = &g_Sessions.back();
-	session->NextFrame = 0;
-	session->HookedFunction = std::make_pair(nullptr, nullptr);
-	session->Instance = g_Instance;
-	session->TrackingSpace = XR_REFERENCE_SPACE_TYPE_LOCAL;
-	session->SystemProperties = XR_TYPE(SYSTEM_PROPERTIES);
-	for (int i = 0; i < ovrEye_Count; i++) {
-		session->ViewConfigs[i] = XR_TYPE(VIEW_CONFIGURATION_VIEW);
-		session->DefaultEyeViews[i] = XR_TYPE(VIEW);
-	}
 
-	// Initialize hacks
-	session->Details.reset(new SessionDetails(session->Instance));
-
-	// Initialize input
-	session->Input.reset(new InputManager(session->Instance));
-
-	XrSystemGetInfo systemInfo = XR_TYPE(SYSTEM_GET_INFO);
-	systemInfo.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
-	CHK_XR(xrGetSystem(session->Instance, &systemInfo, &session->System));
-	CHK_XR(xrGetSystemProperties(session->Instance, session->System, &session->SystemProperties));
-
-	uint32_t numViews;
-	CHK_XR(xrEnumerateViewConfigurationViews(session->Instance, session->System, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, ovrEye_Count, &numViews, session->ViewConfigs));
-	assert(numViews == ovrEye_Count);
-
-	XrGraphicsRequirementsD3D11KHR graphicsReq = XR_TYPE(GRAPHICS_REQUIREMENTS_D3D11_KHR);
-	CHK_XR(GetD3D11GraphicsRequirementsKHR(session->Instance, session->System, &graphicsReq));
-
-	// Copy the LUID into the structure
-	static_assert(sizeof(graphicsReq.adapterLuid) == sizeof(ovrGraphicsLuid),
-		"The adapter LUID needs to fit in ovrGraphicsLuid");
+	// Initialize session, it will not be fully usable until a swapchain is created
+	session->InitSession(g_Instance);
 	if (pLuid)
-		memcpy(pLuid, &graphicsReq.adapterLuid, sizeof(ovrGraphicsLuid));
-
-	// Create a temporary session to retrieve the headset field-of-view
-	Microsoft::WRL::ComPtr<IDXGIFactory1> pFactory = NULL;
-	if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void**)&pFactory)))
-	{
-		Microsoft::WRL::ComPtr<IDXGIAdapter1> pAdapter;
-		Microsoft::WRL::ComPtr<ID3D11Device> pDevice;
-
-		for (UINT i = 0; pFactory->EnumAdapters1(i, &pAdapter) != DXGI_ERROR_NOT_FOUND; ++i)
-		{
-			DXGI_ADAPTER_DESC1 adapterDesc;
-			if (SUCCEEDED(pAdapter->GetDesc1(&adapterDesc)) &&
-				memcmp(&adapterDesc.AdapterLuid, &graphicsReq.adapterLuid, sizeof(graphicsReq.adapterLuid)) == 0)
-			{
-				break;
-			}
-		}
-
-		HRESULT hr = D3D11CreateDevice(pAdapter.Get(),
-			D3D_DRIVER_TYPE_UNKNOWN, 0, 0,
-			NULL, 0, D3D11_SDK_VERSION,
-			&pDevice, nullptr, nullptr);
-		assert(SUCCEEDED(hr));
-
-		XrGraphicsBindingD3D11KHR graphicsBinding = XR_TYPE(GRAPHICS_BINDING_D3D11_KHR);
-		graphicsBinding.device = pDevice.Get();
-
-		XrSession fakeSession;
-		XrSessionCreateInfo createInfo = XR_TYPE(SESSION_CREATE_INFO);
-		createInfo.next = &graphicsBinding;
-		createInfo.systemId = session->System;
-		CHK_XR(xrCreateSession(session->Instance, &createInfo, &fakeSession));
-
-		XrSpace viewSpace;
-		XrReferenceSpaceCreateInfo spaceInfo = XR_TYPE(REFERENCE_SPACE_CREATE_INFO);
-		spaceInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
-		spaceInfo.poseInReferenceSpace = XR::Posef(XR::Posef::Identity());
-		CHK_XR(xrCreateReferenceSpace(fakeSession, &spaceInfo, &viewSpace));
-
-		XrSessionBeginInfo beginInfo = XR_TYPE(SESSION_BEGIN_INFO);
-		beginInfo.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
-		CHK_XR(xrBeginSession(fakeSession, &beginInfo));
-
-		for (int i = 0; i < ovrEye_Count; i++)
-			session->DefaultEyeViews[i] = XR_TYPE(VIEW);
-
-		uint32_t numViews;
-		XrViewLocateInfo locateInfo = XR_TYPE(VIEW_LOCATE_INFO);
-		XrViewState viewState = XR_TYPE(VIEW_STATE);
-		locateInfo.space = viewSpace;
-		locateInfo.viewConfigurationType = beginInfo.primaryViewConfigurationType;
-		locateInfo.displayTime = 1337;
-		XrResult rs = xrLocateViews(fakeSession, &locateInfo, &viewState, ovrEye_Count, &numViews, session->DefaultEyeViews);
-		assert(XR_SUCCEEDED(rs));
-		assert(numViews == ovrEye_Count);
-
-		xrRequestExitSession(fakeSession);
-		while (!XR_SUCCEEDED(xrEndSession(fakeSession)))
-			std::this_thread::sleep_for(std::chrono::milliseconds(100));
-		CHK_XR(xrDestroySession(fakeSession));
-	}
-
+		*pLuid = session->Adapter;
 	*pSession = session;
 	return ovrSuccess;
 }
@@ -283,30 +213,19 @@ OVR_PUBLIC_FUNCTION(void) ovr_Destroy(ovrSession session)
 {
 	REV_TRACE(ovr_Destroy);
 
-	XrSession handle = session->Session;
-	if (handle)
-	{
-		xrRequestExitSession(session->Session);
-		while (!XR_SUCCEEDED(xrEndSession(handle)))
-			std::this_thread::sleep_for(std::chrono::milliseconds(100));
-	}
+	session->EndSession();
 
-	if (session->HookedFunction.first)
+	if (!session->HookedFunctions.empty())
 	{
 		DetourTransactionBegin();
 		DetourUpdateThread(GetCurrentThread());
-		DetourDetach(session->HookedFunction.first, session->HookedFunction.second);
+		for (auto it : session->HookedFunctions)
+		DetourDetach(it.first, it.second);
 		DetourTransactionCommit();
 	}
 
 	// Delete the session from the list of sessions
 	g_Sessions.erase(std::find_if(g_Sessions.begin(), g_Sessions.end(), [session](ovrHmdStruct const& o) { return &o == session; }));
-
-	if (handle)
-	{
-		XrResult rs = xrDestroySession(handle);
-		assert(XR_SUCCEEDED(rs));
-	}
 }
 
 OVR_PUBLIC_FUNCTION(ovrResult) ovr_GetSessionStatus(ovrSession session, ovrSessionStatus* sessionStatus)
@@ -382,6 +301,20 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_GetSessionStatus(ovrSession session, ovrSessi
 			}
 			break;
 		}
+		case XR_TYPE_EVENT_DATA_VISIBILITY_MASK_CHANGED_KHR:
+		{
+			const XrEventDataVisibilityMaskChangedKHR& maskChange =
+				reinterpret_cast<XrEventDataVisibilityMaskChangedKHR&>(event);
+
+			if (maskChange.viewConfigurationType == XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO
+				&& maskChange.viewIndex < ovrEye_Count)
+			{
+				session->UpdateStencil((ovrEyeType)maskChange.viewIndex, XR_VISIBILITY_MASK_TYPE_HIDDEN_TRIANGLE_MESH_KHR);
+				session->UpdateStencil((ovrEyeType)maskChange.viewIndex, XR_VISIBILITY_MASK_TYPE_VISIBLE_TRIANGLE_MESH_KHR);
+				session->UpdateStencil((ovrEyeType)maskChange.viewIndex, XR_VISIBILITY_MASK_TYPE_LINE_LOOP_KHR);
+			}
+			break;
+		}
 		}
 		event = XR_TYPE(EVENT_DATA_BUFFER);
 	}
@@ -395,7 +328,7 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_GetSessionStatus(ovrSession session, ovrSessi
 	sessionStatus->HasInputFocus = status.HasInputFocus;
 	sessionStatus->OverlayPresent = status.OverlayPresent;
 #if 0 // TODO: Re-enable once we figure out why this crashes Arktika.1
-	sessionStatus->DepthRequested = g_Extensions.CompositionDepth;
+	sessionStatus->DepthRequested = session->Extensions->CompositionDepth;
 #endif
 
 	return ovrSuccess;
@@ -430,7 +363,7 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_RecenterTrackingOrigin(ovrSession session)
 		return ovrError_InvalidSession;
 
 	XrSpaceLocation relation = XR_TYPE(SPACE_LOCATION);
-	CHK_XR(xrLocateSpace(session->ViewSpace, session->LocalSpace, session->CurrentFrame.predictedDisplayTime, &relation));
+	CHK_XR(xrLocateSpace(session->ViewSpace, session->LocalSpace, (*session->CurrentFrame).predictedDisplayTime, &relation));
 
 	if (!(relation.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT))
 		return ovrError_InvalidHeadsetOrientation;
@@ -519,7 +452,8 @@ OVR_PUBLIC_FUNCTION(ovrTrackerPose) ovr_GetTrackerPose(ovrSession session, unsig
 		OVR::Posef trackerPose = poses[trackerPoseIndex];
 
 		XrSpaceLocation relation = XR_TYPE(SPACE_LOCATION);
-		if (XR_SUCCEEDED(xrLocateSpace(session->ViewSpace, session->LocalSpace, session->PendingFrame.predictedDisplayTime, &relation)))
+		if (session->Session && XR_SUCCEEDED(xrLocateSpace(session->ViewSpace, session->LocalSpace,
+			(*session->CurrentFrame).predictedDisplayTime, &relation)))
 		{
 			// Create a leveled head pose
 			if (relation.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)
@@ -528,6 +462,8 @@ OVR_PUBLIC_FUNCTION(ovrTrackerPose) ovr_GetTrackerPose(ovrSession session, unsig
 				XR::Posef headPose(relation.pose);
 				headPose.Rotation.GetYawPitchRoll(&yaw, nullptr, nullptr);
 				headPose.Rotation = OVR::Quatf(OVR::Axis_Y, yaw);
+
+				// Rotate the trackers with the headset so that the headset is always in view
 				trackerPose = headPose * trackerPose;
 			}
 		}
@@ -571,20 +507,23 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_GetInputState(ovrSession session, ovrControll
 {
 	REV_TRACE(ovr_GetInputState);
 
-	if (!session || !session->Input)
+	if (!session)
 		return ovrError_InvalidSession;
 
 	if (!inputState)
 		return ovrError_InvalidParameter;
 
 	ovrInputState state = { 0 };
-	ovrResult result = session->Input->GetInputState(session, controllerType, &state);
+
+	ovrResult result = ovrSuccess;
+	if (session->Input && session->Session)
+		result = session->Input->GetInputState(session, controllerType, &state);
 
 	// We need to make sure we don't write outside of the bounds of the struct
 	// when the client expects a pre-1.7 version of LibOVR.
-	if (g_MinorVersion < 7)
+	if (Runtime::Get().MinorVersion < 7)
 		memcpy(inputState, &state, sizeof(ovrInputState1));
-	else if (g_MinorVersion < 11)
+	else if (Runtime::Get().MinorVersion < 11)
 		memcpy(inputState, &state, sizeof(ovrInputState2));
 	else
 		memcpy(inputState, &state, sizeof(ovrInputState));
@@ -785,7 +724,7 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_GetTextureSwapChainLength(ovrSession session,
 	if (!chain)
 		return ovrError_InvalidParameter;
 
-	MICROPROFILE_META_CPU("Identifier", (int)chain->Swapchain);
+	MICROPROFILE_META_CPU("Identifier", PtrToInt(chain->Swapchain));
 	*out_Length = chain->Length;
 	return ovrSuccess;
 }
@@ -797,7 +736,7 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_GetTextureSwapChainCurrentIndex(ovrSession se
 	if (!chain)
 		return ovrError_InvalidParameter;
 
-	MICROPROFILE_META_CPU("Identifier", (int)chain->Swapchain);
+	MICROPROFILE_META_CPU("Identifier", PtrToInt(chain->Swapchain));
 	MICROPROFILE_META_CPU("Index", chain->CurrentIndex);
 	*out_Index = chain->CurrentIndex;
 	return ovrSuccess;
@@ -810,7 +749,7 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_GetTextureSwapChainDesc(ovrSession session, o
 	if (!chain)
 		return ovrError_InvalidParameter;
 
-	MICROPROFILE_META_CPU("Identifier", (int)chain->Swapchain);
+	MICROPROFILE_META_CPU("Identifier", PtrToInt(chain->Swapchain));
 	*out_Desc = chain->Desc;
 	return ovrSuccess;
 }
@@ -825,18 +764,21 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_CommitTextureSwapChain(ovrSession session, ov
 	if (!chain)
 		return ovrError_InvalidParameter;
 
-	MICROPROFILE_META_CPU("Identifier", (int)chain->Swapchain);
+	MICROPROFILE_META_CPU("Identifier", PtrToInt(chain->Swapchain));
 	MICROPROFILE_META_CPU("CurrentIndex", chain->CurrentIndex);
 
 	XrSwapchainImageReleaseInfo releaseInfo = XR_TYPE(SWAPCHAIN_IMAGE_RELEASE_INFO);
 	CHK_XR(xrReleaseSwapchainImage(chain->Swapchain, &releaseInfo));
 
-	XrSwapchainImageAcquireInfo acquireInfo = XR_TYPE(SWAPCHAIN_IMAGE_ACQUIRE_INFO);
-	CHK_XR(xrAcquireSwapchainImage(chain->Swapchain, &acquireInfo, &chain->CurrentIndex));
+	if (!chain->Desc.StaticImage)
+	{
+		XrSwapchainImageAcquireInfo acquireInfo = XR_TYPE(SWAPCHAIN_IMAGE_ACQUIRE_INFO);
+		CHK_XR(xrAcquireSwapchainImage(chain->Swapchain, &acquireInfo, &chain->CurrentIndex));
 
-	XrSwapchainImageWaitInfo waitInfo = XR_TYPE(SWAPCHAIN_IMAGE_WAIT_INFO);
-	waitInfo.timeout = session->CurrentFrame.predictedDisplayPeriod;
-	CHK_XR(xrWaitSwapchainImage(chain->Swapchain, &waitInfo));
+		XrSwapchainImageWaitInfo waitInfo = XR_TYPE(SWAPCHAIN_IMAGE_WAIT_INFO);
+		waitInfo.timeout = (*session->CurrentFrame).predictedDisplayPeriod;
+		CHK_XR(xrWaitSwapchainImage(chain->Swapchain, &waitInfo));
+	}
 
 	return ovrSuccess;
 }
@@ -869,13 +811,11 @@ OVR_PUBLIC_FUNCTION(ovrSizei) ovr_GetFovTextureSize(ovrSession session, ovrEyeTy
 {
 	REV_TRACE(ovr_GetFovTextureSize);
 
-	// TODO: Calculate the size from the fov
 	// TODO: Add support for pixelsPerDisplayPixel
 	ovrSizei size = {
-		(int)session->ViewConfigs[eye].recommendedImageRectWidth,
-		(int)session->ViewConfigs[eye].recommendedImageRectHeight,
+		(int)(session->PixelsPerTan[eye].x * (fov.LeftTan + fov.RightTan)),
+		(int)(session->PixelsPerTan[eye].y * (fov.UpTan + fov.DownTan)),
 	};
-
 	return size;
 }
 
@@ -893,32 +833,11 @@ OVR_PUBLIC_FUNCTION(ovrEyeRenderDesc) ovr_GetRenderDesc2(ovrSession session, ovr
 
 	desc.DistortedViewport.Size.w = session->ViewConfigs[eyeType].recommendedImageRectWidth;
 	desc.DistortedViewport.Size.h = session->ViewConfigs[eyeType].recommendedImageRectHeight;
+	desc.PixelsPerTanAngleAtCenter = session->PixelsPerTan[eyeType];
 
-	desc.PixelsPerTanAngleAtCenter = OVR::Vector2f(
-		desc.DistortedViewport.Size.w / (fov.LeftTan + fov.RightTan),
-		desc.DistortedViewport.Size.h / (fov.UpTan + fov.DownTan)
-	);
-
-	XR::Posef pose = session->DefaultEyeViews[eyeType].pose;
-	if (session->Session)
-	{
-		uint32_t numViews;
-		XrViewLocateInfo locateInfo = XR_TYPE(VIEW_LOCATE_INFO);
-		XrViewState viewState = XR_TYPE(VIEW_STATE);
-		XrView views[ovrEye_Count] = { XR_TYPE(VIEW), XR_TYPE(VIEW) };
-		locateInfo.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
-		locateInfo.displayTime = session->CurrentFrame.predictedDisplayTime;
-		locateInfo.space = session->ViewSpace;
-		XrResult rs = xrLocateViews(session->Session, &locateInfo, &viewState, ovrEye_Count, &numViews, views);
-		assert(XR_SUCCEEDED(rs));
-		assert(numViews == ovrEye_Count);
-
-		// FIXME: WMR viewState flags are bugged
-		if (views[eyeType].pose.orientation.w != 0.0f)
-			pose = views[eyeType].pose;
-	}
-
-	desc.HmdToEyePose = pose;
+	XrView views[ovrEye_Count] = { XR_TYPE(VIEW), XR_TYPE(VIEW) };
+	session->LocateViews(views);
+	desc.HmdToEyePose = XR::Posef(views[eyeType].pose);
 	return desc;
 }
 
@@ -944,12 +863,21 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_WaitToBeginFrame(ovrSession session, long lon
 	REV_TRACE(ovr_WaitToBeginFrame);
 	MICROPROFILE_META_CPU("Wait Frame", (int)frameIndex);
 
-	if (!session || !session->Session)
+	if (!session)
 		return ovrError_InvalidSession;
 
+	{
+		// Wait until the session is running, since the render thread may still be initializing
+		std::unique_lock<std::mutex> lk(session->Running.first);
+		if (!session->Running.second.wait_for(lk, 10s, [session] { return session->Session != XR_NULL_HANDLE; }))
+			return ovrError_Timeout;
+	}
+
+	XrIndexedFrameState* frameState = &session->FrameStats[frameIndex % ovrMaxProvidedFrameStats];
 	XrFrameWaitInfo waitInfo = XR_TYPE(FRAME_WAIT_INFO);
-	session->PendingFrame = XR_TYPE(FRAME_STATE);
-	CHK_XR(xrWaitFrame(session->Session, &waitInfo, &session->PendingFrame));
+	CHK_XR(xrWaitFrame(session->Session, &waitInfo, frameState));
+	frameState->frameIndex = frameIndex;
+	session->CurrentFrame = frameState;
 	return ovrSuccess;
 }
 
@@ -958,12 +886,13 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_BeginFrame(ovrSession session, long long fram
 	REV_TRACE(ovr_BeginFrame);
 	MICROPROFILE_META_CPU("Begin Frame", (int)frameIndex);
 
-	if (!session || !session->Session)
+	if (!session)
 		return ovrError_InvalidSession;
+
+	assert(frameIndex == (*session->CurrentFrame).frameIndex);
 
 	XrFrameBeginInfo beginInfo = XR_TYPE(FRAME_BEGIN_INFO);
 	CHK_XR(xrBeginFrame(session->Session, &beginInfo));
-	session->CurrentFrame = session->PendingFrame;
 	return ovrSuccess;
 }
 
@@ -987,8 +916,26 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_EndFrame(ovrSession session, long long frameI
 	REV_TRACE(ovr_EndFrame);
 	MICROPROFILE_META_CPU("End Frame", (int)frameIndex);
 
-	if (!session || !session->Session)
+	if (!session)
 		return ovrError_InvalidSession;
+
+	// The oculus runtime is very tolerant of invalid viewports, so this lambda ensures we submit valid ones.
+	// This fixes UE4 games which can at times submit uninitialized viewports due to a bug in OVR_Math.h.
+	const auto ClampRect = [](ovrRecti rect, ovrTextureSwapChain chain)
+	{
+		OVR::Sizei chainSize(chain->Desc.Width, chain->Desc.Height);
+
+		// Clamp the rectangle size within the chain size
+		rect.Size = OVR::Sizei::Min(OVR::Sizei::Max(rect.Size, OVR::Sizei(1, 1)), chainSize);
+
+		// Set any invalid coordinates to zero
+		if (rect.Pos.x < 0 || rect.Pos.x + rect.Size.w > chainSize.w)
+			rect.Pos.x = 0;
+		if (rect.Pos.y < 0 || rect.Pos.y + rect.Size.h > chainSize.h)
+			rect.Pos.y = 0;
+
+		return XR::Recti(rect);
+	};
 
 	std::vector<XrCompositionLayerBaseHeader*> layers;
 	std::list<XrCompositionLayerUnion> layerData;
@@ -1008,10 +955,8 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_EndFrame(ovrSession session, long long frameI
 		// Version 1.25 introduced a 128-byte reserved parameter, so on older versions the actual data
 		// falls within this reserved parameter and we need to move the pointer back into the actual data area.
 		// NOTE: Do not read the header after this operation as it will fall outside of the layer memory.
-		if (g_MinorVersion < 25)
-		{
+		if (Runtime::Get().MinorVersion < 25)
 			layer = (ovrLayer_Union*)((char*)layer - sizeof(ovrLayerHeader::Reserved));
-		}
 
 		layerData.emplace_back();
 		XrCompositionLayerUnion& newLayer = layerData.back();
@@ -1045,7 +990,7 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_EndFrame(ovrSession session, long long frameI
 				{
 					view.pose = XR::Posef(layer->EyeFov.RenderPose[i]);
 
-					// The Climb specifies an invalid fov in the first frame
+					// The Climb specifies an invalid fov in the first frame, ignore the layer
 					XR::FovPort Fov(layer->EyeFov.Fov[i]);
 					if (Fov.GetMaxSideTan() > 0.0f)
 						view.fov = Fov;
@@ -1053,18 +998,19 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_EndFrame(ovrSession session, long long frameI
 						break;
 				}
 
-				// Flip the field-of-view to flip the image
-				if (upsideDown)
+				// Flip the field-of-view to flip the image, invert the check for OpenGL
+				if (texture->Images->type == XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_KHR ? !upsideDown : upsideDown)
 					OVR::OVRMath_Swap(view.fov.angleUp, view.fov.angleDown);
 
-				if (type == ovrLayerType_EyeFovDepth && g_Extensions.CompositionDepth)
+				if (type == ovrLayerType_EyeFovDepth && Runtime::Get().CompositionDepth)
 				{
 					depthData.emplace_back();
 					XrCompositionLayerDepthInfoKHR& depthInfo = depthData.back();
 					depthInfo = XR_TYPE(COMPOSITION_LAYER_DEPTH_INFO_KHR);
 
-					depthInfo.subImage.swapchain = layer->EyeFovDepth.DepthTexture[i]->Swapchain;
-					depthInfo.subImage.imageRect = XR::Recti(layer->EyeFovDepth.Viewport[i]);
+					ovrTextureSwapChain depthTexture = layer->EyeFovDepth.DepthTexture[i];
+					depthInfo.subImage.swapchain = depthTexture->Swapchain;
+					depthInfo.subImage.imageRect = ClampRect(layer->EyeFovDepth.Viewport[i], depthTexture);
 					depthInfo.subImage.imageArrayIndex = 0;
 
 					const ovrTimewarpProjectionDesc& projDesc = layer->EyeFovDepth.ProjectionDesc;
@@ -1083,11 +1029,11 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_EndFrame(ovrSession session, long long frameI
 				}
 
 				view.subImage.swapchain = texture->Swapchain;
-				view.subImage.imageRect = XR::Recti(layer->EyeFov.Viewport[i]);
+				view.subImage.imageRect = ClampRect(layer->EyeFov.Viewport[i], texture);
 				view.subImage.imageArrayIndex = 0;
 			}
 
-			// Verify all views were initialized without errors
+			// Verify all views were initialized without errors, otherwise ignore the layer
 			if (i < ovrEye_Count)
 				continue;
 
@@ -1096,35 +1042,37 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_EndFrame(ovrSession session, long long frameI
 		}
 		else if (type == ovrLayerType_Quad)
 		{
-			if (!layer->Quad.ColorTexture)
+			ovrTextureSwapChain texture = layer->Quad.ColorTexture;
+			if (!texture)
 				continue;
 
 			XrCompositionLayerQuad& quad = newLayer.Quad;
 			quad = XR_TYPE(COMPOSITION_LAYER_QUAD);
 			quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
-			quad.subImage.swapchain = layer->Quad.ColorTexture->Swapchain;
-			quad.subImage.imageRect = XR::Recti(layer->Quad.Viewport);
+			quad.subImage.swapchain = texture->Swapchain;
+			quad.subImage.imageRect = ClampRect(layer->Quad.Viewport, texture);
 			quad.subImage.imageArrayIndex = 0;
 			quad.pose = XR::Posef(layer->Quad.QuadPoseCenter);
 			quad.size = XR::Vector2f(layer->Quad.QuadSize);
 		}
-		else if (type == ovrLayerType_Cylinder && g_Extensions.CompositionCylinder)
+		else if (type == ovrLayerType_Cylinder && Runtime::Get().CompositionCylinder)
 		{
-			if (!layer->Cylinder.ColorTexture)
+			ovrTextureSwapChain texture = layer->Cylinder.ColorTexture;
+			if (!texture)
 				continue;
 
 			XrCompositionLayerCylinderKHR& cylinder = newLayer.Cylinder;
 			cylinder = XR_TYPE(COMPOSITION_LAYER_CYLINDER_KHR);
 			cylinder.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
-			cylinder.subImage.swapchain = layer->Cylinder.ColorTexture->Swapchain;
-			cylinder.subImage.imageRect = XR::Recti(layer->Cylinder.Viewport);
+			cylinder.subImage.swapchain = texture->Swapchain;
+			cylinder.subImage.imageRect = ClampRect(layer->Cylinder.Viewport, texture);
 			cylinder.subImage.imageArrayIndex = 0;
 			cylinder.pose = XR::Posef(layer->Cylinder.CylinderPoseCenter);
 			cylinder.radius = layer->Cylinder.CylinderRadius;
 			cylinder.centralAngle = layer->Cylinder.CylinderAngle;
 			cylinder.aspectRatio = layer->Cylinder.CylinderAspectRatio;
 		}
-		else if (type == ovrLayerType_Cube && g_Extensions.CompositionCube)
+		else if (type == ovrLayerType_Cube && Runtime::Get().CompositionCube)
 		{
 			if (!layer->Cube.CubeMapTexture)
 				continue;
@@ -1138,6 +1086,8 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_EndFrame(ovrSession session, long long frameI
 		}
 		else
 		{
+			// Layer type not recognized or disabled, ignore the layer
+			assert(type == ovrLayerType_Disabled);
 			continue;
 		}
 
@@ -1153,18 +1103,13 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_EndFrame(ovrSession session, long long frameI
 	}
 
 	XrFrameEndInfo endInfo = XR_TYPE(FRAME_END_INFO);
-	endInfo.displayTime = session->CurrentFrame.predictedDisplayTime;
+	endInfo.displayTime = (*session->CurrentFrame).predictedDisplayTime;
 	endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
 	endInfo.layerCount = (uint32_t)layers.size();
 	endInfo.layers = layers.data();
 	CHK_XR(xrEndFrame(session->Session, &endInfo));
 
 	MicroProfileFlip();
-
-	if (frameIndex > 0)
-		session->NextFrame = frameIndex + 1;
-	else
-		session->NextFrame++;
 
 	return ovrSuccess;
 }
@@ -1175,12 +1120,15 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_SubmitFrame2(ovrSession session, long long fr
 	REV_TRACE(ovr_SubmitFrame);
 	MICROPROFILE_META_CPU("Submit Frame", (int)frameIndex);
 
-	if (!session || !session->Session)
+	if (!session)
 		return ovrError_InvalidSession;
 
+	if (frameIndex <= 0)
+		frameIndex = (*session->CurrentFrame).frameIndex;
+
 	CHK_OVR(ovr_EndFrame(session, frameIndex, viewScaleDesc, layerPtrList, layerCount));
-	CHK_OVR(ovr_WaitToBeginFrame(session, session->NextFrame));
-	CHK_OVR(ovr_BeginFrame(session, session->NextFrame));
+	CHK_OVR(ovr_WaitToBeginFrame(session, frameIndex + 1));
+	CHK_OVR(ovr_BeginFrame(session, frameIndex + 1));
 	return ovrSuccess;
 }
 
@@ -1226,7 +1174,11 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_GetPerfStats(ovrSession session, ovrPerfStats
 {
 	REV_TRACE(ovr_GetPerfStats);
 
-	return ovrError_Unsupported;
+	if (Runtime::Get().MinorVersion < 11)
+		memset(outStats, 0, sizeof(ovrPerfStats1));
+	else
+		memset(outStats, 0, sizeof(ovrPerfStats));
+	return ovrSuccess;
 }
 
 OVR_PUBLIC_FUNCTION(ovrResult) ovr_ResetPerfStats(ovrSession session)
@@ -1243,10 +1195,23 @@ OVR_PUBLIC_FUNCTION(double) ovr_GetPredictedDisplayTime(ovrSession session, long
 
 	MICROPROFILE_META_CPU("Predict Frame", (int)frameIndex);
 
-	XrTime displayTime = session->PendingFrame.predictedDisplayTime;
-
-	if (frameIndex > 0)
-		displayTime += session->PendingFrame.predictedDisplayPeriod * (session->NextFrame - frameIndex);
+	XrIndexedFrameState* CurrentFrame = session->CurrentFrame;
+	XrTime displayTime = CurrentFrame->predictedDisplayTime;
+	if (frameIndex > CurrentFrame->frameIndex)
+	{
+		// There is no predicted display period for this frame yet, synthesize one
+		displayTime += CurrentFrame->predictedDisplayPeriod * (frameIndex - CurrentFrame->frameIndex);
+	}
+	else if (frameIndex < CurrentFrame->frameIndex)
+	{
+		// We keep a history of older frames, check if this is within the history range
+		// If not, then synthesize an older display time
+		long long delta = CurrentFrame->frameIndex - frameIndex;
+		if (delta < ovrMaxProvidedFrameStats)
+			displayTime = session->FrameStats[frameIndex % ovrMaxProvidedFrameStats].predictedDisplayTime;
+		else
+			displayTime -= CurrentFrame->predictedDisplayPeriod * delta;
+	}
 
 	static double PerfFrequencyInverse = 0.0;
 	if (PerfFrequencyInverse == 0.0)
@@ -1258,7 +1223,7 @@ OVR_PUBLIC_FUNCTION(double) ovr_GetPredictedDisplayTime(ovrSession session, long
 
 	LARGE_INTEGER li;
 	if (XR_FAILED(ConvertTimeToWin32PerformanceCounterKHR(session->Instance, displayTime, &li)))
-		return ovr_GetTimeInSeconds();
+		return 0.0;
 
 	return li.QuadPart * PerfFrequencyInverse;
 }
@@ -1319,12 +1284,19 @@ OVR_PUBLIC_FUNCTION(float) ovr_GetFloat(ovrSession session, const char* property
 	if (session)
 	{
 		if (strcmp(propertyName, "IPD") == 0)
-			return XR::Vector3f(session->DefaultEyeViews[ovrEye_Left].pose.position).Distance(
-				XR::Vector3f(session->DefaultEyeViews[ovrEye_Right].pose.position)
+		{
+			// Locate the eyes in view space to compute the IPD
+			XrView views[ovrEye_Count] = { XR_TYPE(VIEW), XR_TYPE(VIEW) };
+			if (OVR_FAILURE(session->LocateViews(views)))
+				return 0.0f;
+
+			return XR::Vector3f(views[ovrEye_Left].pose.position).Distance(
+				XR::Vector3f(views[ovrEye_Right].pose.position)
 			);
+		}
 
 		if (strcmp(propertyName, "VsyncToNextVsync") == 0)
-			return session->PendingFrame.predictedDisplayPeriod / 1e9f;
+			return (*session->CurrentFrame).predictedDisplayPeriod / 1e9f;
 	}
 
 	// Override defaults, we should always return a valid value for these
@@ -1471,68 +1443,119 @@ ovr_GetViewportStencil(
 	return ovr_GetFovStencil(session, &fovStencilDesc, outMeshBuffer);
 }
 
-static const XrVector2f VisibleRectangle[] = {
-	{ 0.0f, 0.0f },
-	{ 1.0f, 0.0f },
-	{ 1.0f, 1.0f },
-	{ 0.0f, 1.0f }
-};
-
-static const uint16_t VisibleRectangleIndices[] = {
-	0, 1, 2, 0, 2, 3
-};
-
 OVR_PUBLIC_FUNCTION(ovrResult)
 ovr_GetFovStencil(
 	ovrSession session,
 	const ovrFovStencilDesc* fovStencilDesc,
 	ovrFovStencilMeshBuffer* meshBuffer)
 {
-	if (!g_Extensions.VisibilityMask)
+	if (!Runtime::Get().VisibilityMask)
 		return ovrError_Unsupported;
 
 	if (!session)
 		return ovrError_InvalidSession;
 
-	XR_FUNCTION(session->Instance, GetVisibilityMaskKHR);
+	if (!meshBuffer || !fovStencilDesc)
+		return ovrError_InvalidParameter;
 
+	XrVisibilityMaskTypeKHR type = std::min((XrVisibilityMaskTypeKHR)(fovStencilDesc->StencilType + 1),
+		XR_VISIBILITY_MASK_TYPE_LINE_LOOP_KHR);
+	const VisibilityMask& mask = session->VisibilityMasks[fovStencilDesc->Eye][type];
+
+	// Some runtime advertise support for the extension, but don't return valid masks
+	if (mask.first.empty() || mask.second.empty())
+		return ovrError_Unsupported;
+
+	OVR::ScaleAndOffset2D scaleAndOffset = OVR::FovPort::CreateNDCScaleAndOffsetFromFov(
+		XR::FovPort(session->ViewFov[fovStencilDesc->Eye].recommendedFov));
+
+	// Visibility masks are in view space at z=-1, so we need to construct
+	// a right-handed 2D projection matrix to project the mask to NDC space
+	// TODO: Support the eye orientation in fovStencilDesc
+	OVR::Matrix3f matrix(
+		scaleAndOffset.Scale.x, 0.0f, -scaleAndOffset.Offset.x,
+		0.0f, scaleAndOffset.Scale.y, -scaleAndOffset.Offset.y,
+		0.0f, 0.0f, 0.0f); // We're not interested in the Z value
+
+	const float scale = fovStencilDesc->StencilFlags & ovrFovStencilFlag_MeshOriginAtBottomLeft ? 2.0f : -2.0f;
+	auto ToUVSpace = [matrix, scale](XR::Vector2f v)
+	{
+		// Transform the vertex at the correct distance from the eye
+		OVR::Vector3f result = matrix.Transform(OVR::Vector3f(v.x, v.y, -1.0f));
+
+		// Translate all NDC space vertices to UV space coordinate range [0,1]
+		return OVR::Vector2f(result.x, result.y) / scale + OVR::Vector2f(0.5f);
+	};
+
+	// For the visible rectangle we use the line loop to find rectangle that fits in the visible area
 	if (fovStencilDesc->StencilType == ovrFovStencil_VisibleRectangle)
 	{
-		meshBuffer->UsedVertexCount = sizeof(VisibleRectangle) / sizeof(XrVector2f);
-		meshBuffer->UsedIndexCount = sizeof(VisibleRectangleIndices) / sizeof(uint16_t);
+		meshBuffer->UsedVertexCount = 4;
+		meshBuffer->UsedIndexCount = 6;
+		if (!meshBuffer->AllocVertexCount && !meshBuffer->AllocIndexCount)
+			return ovrSuccess;
+		else if (meshBuffer->AllocVertexCount < meshBuffer->UsedVertexCount ||
+			meshBuffer->AllocIndexCount < meshBuffer->UsedIndexCount ||
+			!meshBuffer->VertexBuffer || !meshBuffer->IndexBuffer)
+			return ovrError_InvalidParameter;
 
-		if (meshBuffer->AllocVertexCount >= meshBuffer->UsedVertexCount)
-			memcpy(meshBuffer->VertexBuffer, VisibleRectangle, sizeof(VisibleRectangle));
-		if (meshBuffer->AllocIndexCount >= meshBuffer->UsedIndexCount)
-			memcpy(meshBuffer->IndexBuffer, VisibleRectangleIndices, sizeof(VisibleRectangleIndices));
+		// Find a line segment in each quadrant closest to diagonal, these will serve as the vertices of our rectangle
+		ovrVector2f vertices[] = { { -1.0f, 1.0f }, { 1.0f, 1.0f },
+			{ 1.0f, -1.0f },  { -1.0f, -1.0f } };
+		float diagonality[] = { MATH_FLOAT_MAXVALUE, MATH_FLOAT_MAXVALUE,
+			MATH_FLOAT_MAXVALUE,  MATH_FLOAT_MAXVALUE };
+		for (size_t i = 0; i < mask.first.size(); i++)
+		{
+			// Compute the line segment and normalize it for comparison
+			OVR::Vector2f line = XR::Vector2f(mask.first[(i + 1) % mask.first.size()]) - XR::Vector2f(mask.first[i]);
+			OVR::Vector2f normalized = line.Normalized();
+
+			// Find out the quadrant we're in based on a clockwise order starting from top-left
+			uint8_t quadrant = abs((mask.first[i].y < 0) * 3 - (mask.first[i].x > 0));
+
+			// Ignore line segments that are straight
+			if (normalized.x == 0 || normalized.y == 0)
+				continue;
+
+			// Find out how close this segment is to being diagonal
+			float delta = abs(abs(normalized.x) - abs(normalized.y));
+			if (delta < diagonality[quadrant])
+			{
+				// Put the vertex half-way along the line segment
+				vertices[quadrant] = XR::Vector2f(mask.first[i]) + line / 2.0f;
+				diagonality[quadrant] = delta;
+			}
+		}
+
+		// Align the rectangle to the axes
+		vertices[0].x = vertices[3].x = std::max(vertices[0].x, vertices[3].x);
+		vertices[0].y = vertices[1].y = std::min(vertices[0].y, vertices[1].y);
+		vertices[1].x = vertices[2].x = std::min(vertices[1].x, vertices[2].x);
+		vertices[2].y = vertices[3].y = std::max(vertices[2].y, vertices[3].y);
+
+		// Translate all NDC space vertices to UV space coordinate range [0,1]
+		for (int i = 0; i < meshBuffer->AllocVertexCount; i++)
+			meshBuffer->VertexBuffer[i] = ToUVSpace(vertices[i]);
+
+		uint16_t indices[] = { 0, 1, 2, 0, 2, 3 };
+		memcpy(meshBuffer->IndexBuffer, indices, sizeof(indices));
 		return ovrSuccess;
 	}
 
-	std::vector<uint32_t> indexBuffer;
-	if (meshBuffer->AllocIndexCount > 0)
-		indexBuffer.resize(meshBuffer->AllocIndexCount);
+	meshBuffer->UsedVertexCount = (int)mask.first.size();
+	meshBuffer->UsedIndexCount = (int)mask.second.size();
+	if (!meshBuffer->AllocVertexCount && !meshBuffer->AllocIndexCount)
+		return ovrSuccess;
+	else if (meshBuffer->AllocVertexCount < meshBuffer->UsedVertexCount ||
+			meshBuffer->AllocIndexCount < meshBuffer->UsedIndexCount ||
+			!meshBuffer->VertexBuffer || !meshBuffer->IndexBuffer)
+		return ovrError_InvalidParameter;
 
-	XrVisibilityMaskTypeKHR type = (XrVisibilityMaskTypeKHR)(fovStencilDesc->StencilType + 1);
-	XrVisibilityMaskKHR mask = XR_TYPE(VISIBILITY_MASK_KHR);
-	mask.vertexCapacityInput = meshBuffer->AllocVertexCount;
-	mask.vertices = (XrVector2f*)meshBuffer->VertexBuffer;
-	mask.indexCapacityInput = meshBuffer->AllocIndexCount;
-	mask.indices = meshBuffer->IndexBuffer ? indexBuffer.data() : nullptr;
-	CHK_XR(GetVisibilityMaskKHR(session->Session, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, fovStencilDesc->Eye, type, &mask));
-	meshBuffer->UsedVertexCount = mask.vertexCountOutput;
-	meshBuffer->UsedIndexCount = mask.indexCountOutput;
+	for (int i = 0; i < meshBuffer->AllocVertexCount; i++)
+		meshBuffer->VertexBuffer[i] = ToUVSpace(mask.first[i]);
 
-	if (meshBuffer->VertexBuffer && !(fovStencilDesc->StencilFlags & ovrFovStencilFlag_MeshOriginAtBottomLeft))
-	{
-		for (int i = 0; i < meshBuffer->AllocVertexCount; i++)
-			meshBuffer->VertexBuffer[i].y = 1.0f - meshBuffer->VertexBuffer[i].y;
-	}
-
-	if (meshBuffer->IndexBuffer)
-	{
-		for (int i = 0; i < meshBuffer->AllocIndexCount; i++)
-			meshBuffer->IndexBuffer[i] = (uint16_t)indexBuffer[i];
-	}
+	for (int i = 0; i < meshBuffer->AllocIndexCount; i++)
+		meshBuffer->IndexBuffer[i] = (uint16_t)mask.second[i];
 
 	return ovrSuccess;
 }
@@ -1599,19 +1622,20 @@ ovr_EnableHybridRaycast()
 }
 
 OVR_PUBLIC_FUNCTION(ovrResult)
-ovr_GetHmdColorDesc()
-{
-	return ovrError_Unsupported;
-}
-
-OVR_PUBLIC_FUNCTION(ovrResult)
 ovr_QueryDistortion()
 {
 	return ovrError_Unsupported;
 }
 
+OVR_PUBLIC_FUNCTION(ovrHmdColorDesc)
+ovr_GetHmdColorDesc(ovrSession session)
+{
+	ovrHmdColorDesc desc = { ovrColorSpace_Unknown };
+	return desc;
+}
+
 OVR_PUBLIC_FUNCTION(ovrResult)
-ovr_SetClientColorDesc()
+ovr_SetClientColorDesc(ovrSession session, const ovrHmdColorDesc* colorDesc)
 {
 	return ovrError_Unsupported;
 }

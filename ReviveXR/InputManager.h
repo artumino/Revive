@@ -10,6 +10,8 @@
 #include <atomic>
 #include <mutex>
 
+class Runtime;
+
 class InputManager
 {
 public:
@@ -35,7 +37,7 @@ public:
 		virtual void GetVibrationState(ovrHandType hand, ovrHapticsPlaybackState* outState) { }
 		virtual void StartHaptics(XrSession session) { }
 
-		operator XrActionSet() const { return m_ActionSet; }
+		XrActionSet ActionSet() const { return m_ActionSet; }
 
 	protected:
 		static ovrVector2f ApplyDeadzone(ovrVector2f axis, float deadZone);
@@ -49,7 +51,6 @@ public:
 	public:
 		Action() : m_Action(XR_NULL_HANDLE) {}
 		Action(InputDevice* device, XrActionType type, const char* actionName, const char* localizedName, bool handedAction = false);
-		~Action();
 
 		bool GetDigital(XrSession session, ovrHandType hand = ovrHand_Left) const;
 		bool IsPressed(XrSession session, ovrHandType hand = ovrHand_Left) const;
@@ -88,6 +89,7 @@ public:
 		Action m_Button_BY;
 		Action m_Button_Thumb;
 		Action m_Button_Enter;
+		Action m_Button_Home;
 
 		Action m_Touch_AX;
 		Action m_Touch_BY;
@@ -98,6 +100,9 @@ public:
 		Action m_IndexTrigger;
 		Action m_HandTrigger;
 		Action m_Thumbstick;
+
+		// For WMR profile hack
+		Action m_Trackpad_Buttons;
 
 		Action m_Pose;
 		Action m_Vibration;
@@ -193,7 +198,6 @@ protected:
 
 	ovrTrackingState m_LastTrackingState;
 
-	static XrTime AbsTimeToXrTime(XrInstance instance, double absTime);
 	static unsigned int SpaceRelationToPoseState(const XrSpaceLocation& location, double time, ovrPoseStatef& lastPoseState, ovrPoseStatef& outPoseState);
 };
 
